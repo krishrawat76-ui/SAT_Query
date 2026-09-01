@@ -1,69 +1,204 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import Sidebar from "@/components/Sidebar";
+import QueryInput from "@/components/QueryInput";
+import ResultPanel from "@/components/ResultPanel";
+import ExecutionTrace from "@/components/ExecutionTrace";
+import { useAnalysis } from "@/hooks/useAnalysis";
+import type { ChatSession, ConversationTurn, UploadedImage } from "@/types/api";
+
+function createSession(): ChatSession {
+  return {
+    id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    title: "New chat",
+    turns: [],
+    createdAt: Date.now(),
+  };
+}
 
 export default function Home() {
+  const [sessions, setSessions] = useState<ChatSession[]>(() => [createSession()]);
+  const [activeSessionId, setActiveSessionId] = useState<string>(() => sessions[0].id);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  const [draftQuery, setDraftQuery] = useState("");
+  const [draftImages, setDraftImages] = useState<UploadedImage[]>([]);
+  const pendingTurnRef = useRef<{ sessionId: string; turnId: string } | null>(null);
+  const feedEndRef = useRef<HTMLDivElement>(null);
+
+  const { analyze, result, loading, error } = useAnalysis();
+
+  const activeSession = sessions.find((s) => s.id === activeSessionId) ?? sessions[0];
+
+  // Attribute the (single-shot) hook's async state to whichever turn triggered it.
+  useEffect(() => {
+    const pending = pendingTurnRef.current;
+    if (!pending) return;
+
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === pending.sessionId
+          ? {
+            ...s,
+            turns: s.turns.map((t) =>
+              t.id === pending.turnId
+                ? {
+                  ...t,
+                  loading,
+                  result: result ?? t.result,
+                  error: error ?? null,
+                }
+                : t
+            ),
+          }
+          : s
+      )
+    );
+
+    if (!loading && (result || error)) {
+      pendingTurnRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, error, loading]);
+
+  useEffect(() => {
+    feedEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activeSession?.turns.length, loading]);
+
+  const handleNewChat = () => {
+    const session = createSession();
+    setSessions((prev) => [session, ...prev]);
+    setActiveSessionId(session.id);
+    setDraftQuery("");
+    setDraftImages([]);
+  };
+
+  const handleSelectSession = (id: string) => {
+    setActiveSessionId(id);
+    setDraftQuery("");
+    setDraftImages([]);
+  };
+
+  const handleSubmit = () => {
+    if (!draftQuery.trim() || draftImages.length === 0 || loading || !activeSession) return;
+
+    const turn: ConversationTurn = {
+      id: `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      query: draftQuery.trim(),
+      images: draftImages,
+      result: null,
+      loading: true,
+      error: null,
+      createdAt: Date.now(),
+    };
+
+    pendingTurnRef.current = { sessionId: activeSession.id, turnId: turn.id };
+
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === activeSession.id
+          ? {
+            ...s,
+            title: s.turns.length === 0 ? turn.query.slice(0, 48) : s.title,
+            turns: [...s.turns, turn],
+          }
+          : s
+      )
+    );
+
+    const files = draftImages.map((img) => img.file);
+    const modalities = draftImages.map((img) => img.modality);
+    analyze(files, turn.query, modalities);
+
+    setDraftQuery("");
+    setDraftImages([]);
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
+    <div className="flex h-screen overflow-hidden bg-slate-50">
+      <Sidebar
+        sessions={sessions}
+        activeSessionId={activeSession?.id ?? null}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
+        onNewChat={handleNewChat}
+        onSelectSession={handleSelectSession}
+      />
+
+      <div className="relative flex min-w-0 flex-1 flex-col">
+        <main className="flex-1 overflow-y-auto px-6 py-8">
+          <div className="mx-auto flex max-w-3xl flex-col gap-8 pb-40">
+            {(!activeSession || activeSession.turns.length === 0) && (
+              <div className="flex flex-col items-center justify-center gap-2 py-24 text-center">
+                <h1 className="text-3xl font-medium text-slate-900">
+                  Ready when you are.
+                </h1>
+                <p className="text-base text-slate-400">
+                  Attach satellite imagery and ask a question to begin.
+                </p>
+              </div>
+            )}
+
+            {activeSession?.turns.map((turn) => (
+              <div key={turn.id} className="flex flex-col gap-4">
+                {/* User message */}
+                <div className="flex justify-end">
+                  <div className="max-w-xl space-y-2">
+                    {turn.images.length > 0 && (
+                      <div className="flex flex-wrap justify-end gap-2">
+                        {turn.images.map((img) => (
+                          <div
+                            key={img.id}
+                            className="h-14 w-14 overflow-hidden rounded-2xl border border-slate-200/80 bg-slate-100"
+                          >
+                            {img.preview && (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={img.preview}
+                                alt={img.file.name}
+                                className="h-full w-full object-cover"
+                              />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="rounded-3xl rounded-tr-lg bg-slate-900 px-4 py-2.5 text-sm text-white">
+                      {turn.query}
+                    </div>
+                  </div>
+                </div>
+
+                {/* AI response */}
+                <div className="space-y-4">
+                  <ResultPanel
+                    result={turn.result}
+                    loading={turn.loading}
+                    error={turn.error}
+                  />
+                  <ExecutionTrace trace={turn.result?.execution_trace ?? null} />
+                </div>
+              </div>
+            ))}
+
+            <div ref={feedEndRef} />
+          </div>
+        </main>
+
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-50 via-slate-50/95 to-transparent pb-6 pt-10">
+          <div className="pointer-events-auto px-6">
+            <QueryInput
+              query={draftQuery}
+              onQueryChange={setDraftQuery}
+              images={draftImages}
+              onImagesChange={setDraftImages}
+              onSubmit={handleSubmit}
+              loading={loading}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+          </div>
         </div>
-      </main>
+      </div>
     </div>
   );
 }
