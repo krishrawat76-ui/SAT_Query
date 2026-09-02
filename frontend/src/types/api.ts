@@ -85,4 +85,5 @@ export interface ChatSession {
     title: string;
     turns: ConversationTurn[];
     createdAt: number;
+    pinned?: boolean;
 }

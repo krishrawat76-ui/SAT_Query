@@ -1,62 +1,164 @@
-# SAT_Query Frontend — Component Documentation (Phase 1)
+# SAT_Query Frontend — Component Documentation (Phase 2)
 
-> Covers `feature/core-dashboard`. Ground truth for payload shapes is
-> `backend/app/api/schemas.py`; this doc mirrors it via `src/types/api.ts`.
+> Covers `feature/phase-2-glass-scroll-animation`. Ground truth for
+> payload shapes is `backend/app/api/schemas.py`; this doc mirrors it via
+> `src/types/api.ts`. See `CHANGELOG.md` for the full narrative writeup of
+> this phase.
 
 ## Architecture
 
 ```text
 src/
 ├── app/
-│   └── page.tsx            — layout, owns `images` and `query` state
+│   ├── page.tsx              — owns session/turn state, wires the camera
+│   │                            system to chat submit/retry/scroll events
+│   ├── layout.tsx            — html/body sizing, fonts
+│   └── globals.css           — dark theme tokens, cloud-drift keyframes
 ├── components/
-│   ├── ImageUpload.tsx      — dropzone, up to 2 images, modality selector
-│   ├── QueryInput.tsx       — prompt box, suggestion chips
-│   ├── ResultPanel.tsx      — answer, confidence badge, evidence grid
-│   └── ExecutionTrace.tsx   — collapsible agent trace
+│   ├── SatelliteMap.tsx       — creates the MapLibre map once, hands the
+│   │                            instance to the parent via `onMapReady`
+│   ├── CloudTransition.tsx    — brief smoke puff overlay at flight start
+│   ├── Sidebar.tsx            — session list: search, pin, rename, delete
+│   ├── LibraryDrawer.tsx      — read-only log of every past turn
+│   ├── QueryInput.tsx         — floating glass pill, prompt + suggestions
+│   ├── ImageUpload.tsx        — attach popover + compact attachment chips
+│   ├── ResultPanel.tsx        — answer, confidence badge, evidence grid
+│   ├── ExecutionTrace.tsx     — collapsible agent trace
+│   └── MessageActions.tsx     — copy / retry buttons under each answer
 ├── hooks/
-│   └── useAnalysis.ts       — POST /api/analyze via axios (pre-existing)
+│   ├── useAnalysis.ts         — POST /api/analyze via axios (pre-existing)
+│   └── useMapCamera.ts        — imperative MapLibre camera controller
+├── lib/
+│   ├── mapLocations.ts        — MUMBAI / WASHINGTON_DC / LONDON / OCEAN_START
+│   ├── flightPlan.ts          — distance/zoom/duration math for flights
+│   └── mockResults.ts         — offline fallback AnalysisResponse data
 └── types/
-    └── api.ts               — TS mirror of backend/app/api/schemas.py
+    └── api.ts                 — TS mirror of backend/app/api/schemas.py
 ```
 
-State flow: `page.tsx` owns `images: UploadedImage[]` and `query: string`.
-On submit it calls `analyze(files, query, modalities)` from `useAnalysis`,
-which owns `result` / `loading` / `error`. Child components are otherwise
-stateless/presentational and receive everything via props.
+State flow: `page.tsx` owns `sessions: ChatSession[]`, `activeSessionId`,
+`draftQuery`/`draftImages`, and the camera/animation state
+(`cloudPhase`, `activeTurnId`, `revealedTurnId`). It calls
+`analyze(...)` from `useAnalysis` and attributes the result back to
+whichever turn triggered it via `pendingTurnRef`. All map movement is
+delegated to the `useMapCamera` hook — `page.tsx` never touches the
+MapLibre instance directly.
 
 ## Styling system
 
-- Background: `bg-slate-50`, primary text `text-slate-900`.
-- Containers: `rounded-3xl` (or `rounded-[28px]`), `border-slate-200/80`,
-  `bg-white/80` or `bg-white`, `shadow-sm` / `shadow-md`.
-- Inner elements (image cards, badges, step rows): `rounded-2xl` / `rounded-xl`.
-- Pills/chips (suggestions, modality select): `rounded-full`.
-- Frosted surfaces (query bar, trace panel, header): `backdrop-blur-md` on a
-  translucent white background.
-- Accent color is neutral (`slate-900` for primary actions) — status color
-  (confidence, warnings, step success/error) uses `emerald` / `amber` / `rose`
-  sparingly, never as a brand accent.
+- Background: `bg-slate-950` (`#020617`) everywhere; `html`/`body` match
+  it exactly to avoid any seam at the page edge.
+- Glass panels: `bg-slate-900/60`–`/80` (or `bg-slate-800/80` for the
+  user's own chat bubble) with `backdrop-blur-xl` and `border-white/10`–
+  `/12`, standardized across every floating surface — sidebar, popovers,
+  cards, library, the query pill.
+- Corners: `rounded-3xl` (24px) for primary containers (result card,
+  execution trace, upload popover, library entries, attachment chips);
+  smaller nested elements use `rounded-2xl`/`rounded-xl`. Chat bubbles add
+  a single sharp corner (`rounded-tl-sm` / `rounded-tr-sm`) for the
+  iMessage tail effect.
+- Accent color is neutral — status color (confidence, warnings,
+  step success/error) uses `emerald`/`amber`/`rose` sparingly.
+- The satellite map sits at `z-0`, the cloud puff at `z-20`, the chat feed
+  at `z-10`, and the sidebar/query pill/nav arrows/library at `z-30`/`z-40`.
 
 ## Component reference
 
-### `ImageUpload`
+### `SatelliteMap`
 
 ```ts
-interface ImageUploadProps {
-  images: UploadedImage[];
-  onChange: (images: UploadedImage[]) => void;
-  maxImages?: number; // default 2
+interface SatelliteMapProps {
+  initialTarget: MapTarget; // only used for the very first paint
+  onMapReady: (map: maplibregl.Map) => void;
 }
 ```
 
-- Accepts `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff` via `react-dropzone`.
-- PNG/JPEG get a real `<img>` preview via `URL.createObjectURL`; TIFF/GeoTIFF
-  show a placeholder (browsers can't decode TIFF), matching
-  `05-FRONTEND-PLAN.md`'s "placeholder handling for TIFF" requirement.
-- Object URLs are revoked on remove to avoid leaking memory.
-- Each card has an OPTICAL/SAR `<select>` — this becomes the per-image
-  `modalities` array sent to `/api/analyze`.
+- Creates the map exactly once (mount-only effect), using Esri World
+  Imagery raster tiles (free, no API key).
+- Disables all manual interaction (`dragPan`, `scrollZoom`, `boxZoom`,
+  `doubleClickZoom`, `touchZoomRotate`, `keyboard`) — the camera is
+  strictly synced to chat/scroll state, never user-dragged.
+- Renders as a `fixed inset-0` div behind everything else. Note:
+  `maplibre-gl.css` ships `.maplibregl-map { position: relative }`, which
+  ties with Tailwind's `.fixed` at equal specificity — position is forced
+  via an inline `style` so it always wins the cascade.
+- Does **not** re-fly reactively on prop changes after mount; all
+  subsequent camera control goes through `useMapCamera`.
+
+### `useMapCamera` (hook)
+
+```ts
+function useMapCamera(): {
+  setMap: (map: maplibregl.Map) => void;
+  cancelFlight: () => void;
+  getCurrentPosition: () => { center: [number, number]; zoom: number };
+  flyToSimple: (target: MapTarget, options?: { showMarker?: boolean }) => void;
+  runFivePhaseFlight: (
+    startCoords: [number, number],
+    startZoom: number,
+    targetCoords: [number, number],
+    targetZoom: number,
+    onComplete?: () => void
+  ) => void;
+};
+```
+
+- Holds the map instance and the red target marker in refs; nothing here
+  is React state, so there is no re-render on every animation frame.
+- `cancelFlight()` calls `map.stop()` and bumps an internal flight id —
+  call this (or a function that calls it, like `flyToSimple` /
+  `runFivePhaseFlight`) before starting any new movement so a stale
+  flight's pending phases can never fire on top of a new one.
+- `runFivePhaseFlight` is the cinematic 5-phase sequence described in
+  `CHANGELOG.md`; `flyToSimple` is the plain single-leg move used for
+  scroll recall and the ocean reset.
+
+### `CloudTransition`
+
+```ts
+type CloudPhase = "idle" | "covering" | "clearing";
+interface CloudTransitionProps { phase: CloudPhase; }
+```
+
+Renders `null` when idle. A brief two-layer grey smoke overlay otherwise —
+purely decorative, masks only the first ~300ms of a flight.
+
+### `Sidebar`
+
+```ts
+interface SidebarProps {
+  sessions: ChatSession[];
+  activeSessionId: string | null;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  onNewChat: () => void;
+  onSelectSession: (id: string) => void;
+  onPinSession: (id: string) => void;
+  onRenameSession: (id: string, title: string) => void;
+  onDeleteSession: (id: string) => void;
+  onOpenLibrary: () => void;
+}
+```
+
+- Pinned sessions sort first; search filters by title.
+- Hover reveals Pin/Rename/Delete per row (Pin stays visible once pinned).
+  Rename swaps the row for an inline `<input>`; Delete confirms via
+  `window.confirm` before calling `onDeleteSession`.
+
+### `LibraryDrawer`
+
+```ts
+interface LibraryDrawerProps {
+  open: boolean;
+  onClose: () => void;
+  sessions: ChatSession[];
+}
+```
+
+Read-only right-side drawer. Flattens every session's turns into one
+list (query, thumbnails, detected task, confidence, timestamp) — no
+separate storage, just a view over the same session state `page.tsx`
+already holds.
 
 ### `QueryInput`
 
@@ -64,17 +166,37 @@ interface ImageUploadProps {
 interface QueryInputProps {
   query: string;
   onQueryChange: (value: string) => void;
+  images: UploadedImage[];
+  onImagesChange: (images: UploadedImage[]) => void;
   onSubmit: () => void;
   loading: boolean;
-  disabled?: boolean;
+  sidebarWidth: number; // px, so the pill centers in the non-sidebar pane
 }
 ```
 
-- `Enter` submits, `Shift+Enter` inserts a newline.
-- Suggestion chips are drawn from the exact query strings used in
-  `docs/workflow/09-DEMO-SCRIPT.md` (Demos 1–5) so they double as a demo
-  rehearsal aid.
-- Submit button shows a `Loader2` spinner while `loading` is true.
+- Fixed pill (`bottom-6`), spanning `left: sidebarWidth` to `right: 0`
+  with an inner `mx-auto max-w-3xl`, so it stays centered in the map
+  viewport as the sidebar collapses/expands.
+- `Enter` submits, `Shift+Enter` inserts a newline; suggestion chips
+  filter live as the user types.
+
+### `ImageUpload` / `AttachmentChips`
+
+```ts
+interface ImageUploadProps {
+  images: UploadedImage[];
+  onChange: (images: UploadedImage[]) => void;
+  maxImages?: number; // default 2
+  onRequestClose?: () => void;
+}
+```
+
+- `ImageUpload` is the attach popover (dropzone + 2-column thumbnail
+  grid); `AttachmentChips` is the compact strip shown above the pill once
+  images exist, independent of whether the popover is open.
+- Chip thumbnails use a fixed-height container (`h-14`) matched exactly
+  to the image's own height, so previews keep their natural aspect ratio
+  without overflowing the chip or being force-cropped to a square.
 
 ### `ResultPanel`
 
@@ -86,74 +208,89 @@ interface ResultPanelProps {
 }
 ```
 
-- Renders `result.answer`, a confidence badge (`≥0.8` emerald / `≥0.5` amber /
-  else rose — thresholds match `05-FRONTEND-PLAN.md`'s low/medium/high spec),
-  `result.evidence.images` as a 2-col grid, and `result.evidence.regions` as
-  a labeled confidence list.
-- Three mutually exclusive states: skeleton (`loading`), inline error
+- Renders `result.answer`, a confidence badge (`≥0.8` emerald / `≥0.5`
+  amber / else rose), `result.evidence.images` as a 2-col grid, and
+  `result.evidence.regions` as a labeled confidence list.
+- Four mutually exclusive states: skeleton (`loading`), inline error
   (`error`), empty state (`!result`), populated result.
 
 ### `ExecutionTrace`
 
 ```ts
-interface ExecutionTraceProps {
-  trace: ExecutionTraceData | null;
+interface ExecutionTraceProps { trace: ExecutionTraceData | null; }
+```
+
+- Returns `null` until a trace exists. Closed by default; header always
+  shows `detected_task`, task confidence, and total latency. Expanded
+  body shows reasoning, validation summary, and per-step status/timing.
+
+### `MessageActions`
+
+```ts
+interface MessageActionsProps {
+  text: string | null;      // null hides the Copy button
+  onRetry: () => void;
+  retryDisabled?: boolean;
 }
 ```
 
-- Returns `null` (renders nothing) until a trace exists — avoids an empty
-  accordion before the first request.
-- Closed by default; header always shows `detected_task`, task confidence,
-  and total latency so the key trace facts are visible without expanding.
-- Expanded body shows `reasoning`, validation summary (image count, modality,
-  temporal/cross-modal flags, warnings), and per-step status/timing with
-  `CheckCircle2` / `XCircle` icons per `PipelineStep.status`.
+Copy writes `text` to the clipboard and shows a checkmark for 1.5s; Retry
+calls the parent's retry handler (which re-runs the analysis and replays
+the full camera choreography for that turn).
 
 ## Wiring (`page.tsx`)
 
-- Two-column layout ≥ `lg`: fixed 380px upload rail + flexible result column.
-- Submit is disabled until at least one image is present (`ImageUpload`
-  itself does not block empty-state submission, so `page.tsx` gates it).
-- `images.map((img) => img.modality)` is passed positionally into
-  `analyze(files, query, modalities)`, matching how
-  `backend/app/agent/validator.py` zips `modalities` to `image_paths` by
-  index.
+- Each turn renders as two scroll-snapped sections — `data-section=
+  "landing"` (prompt only, camera lands here first) and `data-section=
+  "result"` (the answer card, revealed only once scrolled into view).
+- A single `IntersectionObserver` (`threshold: 0.5`) drives both: a
+  landing section recalls the camera (`flyToSimple`, 900ms); a result
+  section sets `revealedTurnId`, triggering that card's fade/slide-in.
+- `runCloudFlight(location, turnId)` is the shared entry point for every
+  "real" camera switch — submit, retry, and non-empty chat switches all
+  go through it. It locks the starting vector (`cancelFlight` +
+  `getCurrentPosition`), starts the cloud puff, and calls
+  `runFivePhaseFlight`.
+- `scheduleCameraFlight` wraps `runCloudFlight` in a randomized 60–300ms
+  delay (simulated AI routing time) before submit/retry.
+- `resetMapToOcean()` returns to `IDLE_VIEW` with the marker hidden —
+  used by "New chat" and by switching to any empty chat.
+- Up/down nav arrows (fixed to the right edge) jump between turns,
+  scrolling to the target's landing section and recalling the camera.
 
 ## Testing instructions
 
 1. **Install deps** (already in `frontend/package.json`):
-```bash
+   ```bash
    cd frontend
    npm install
-```
+   ```
 2. **Env**: create `frontend/.env.local`:
-```env
+   ```env
    NEXT_PUBLIC_API_URL=http://localhost:8000
-```
-3. **Run backend** (separate terminal, from repo root):
-```bash
+   ```
+3. **Run backend** (optional — `lib/mockResults.ts` supplies a scripted
+   answer for each location if the backend is unreachable):
+   ```bash
    cd backend
    uvicorn app.main:app --reload --port 8000
-```
+   ```
 4. **Run frontend**:
-```bash
+   ```bash
    npm run dev
-```
+   ```
    Open `http://localhost:3000`.
-5. **Manual smoke test** (mirrors `09-DEMO-SCRIPT.md`):
-   - Upload 1 PNG/JPEG → confirm thumbnail preview renders.
-   - Upload a `.tif` → confirm the "GeoTIFF preview unavailable" placeholder
-     renders instead of a broken image.
-   - Try uploading a 3rd image → dropzone should disable at 2/2.
-   - Click a suggestion chip → textarea populates; press `Enter` → request
-     fires (Analyze button shows spinner).
-   - Toggle a card's modality to SAR with a 2nd image present → verify router
-     hits the `OPTICAL_SAR` pipeline (`execution_trace.detected_task`).
-   - With backend stopped, submit → confirm the axios error message renders
-     in `ResultPanel`'s error state (not a crash).
-   - Expand `ExecutionTrace` → confirm all `pipeline_steps` show correct
-     status icons and per-step timing.
+5. **Manual smoke test**:
+   - Land on the blank ocean view, attach an image, submit a query →
+     smoke puff, five-phase flight to Mumbai, scroll down to reveal the
+     answer card.
+   - Submit a follow-up → flight to Washington DC; a third → London.
+   - Scroll back up through the feed → camera recalls each turn's
+     location; use the up/down arrows as a shortcut.
+   - Click Retry on a card → full choreography replays for that turn.
+   - Pin/rename/delete a chat in the sidebar; open the Library drawer;
+     click New Chat and confirm the map resets to the ocean view.
 6. **Type check**:
-```bash
+   ```bash
    npx tsc --noEmit
-```
+   ```

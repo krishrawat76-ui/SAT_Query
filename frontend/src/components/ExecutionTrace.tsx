@@ -14,14 +14,14 @@ export default function ExecutionTrace({ trace }: ExecutionTraceProps) {
     if (!trace) return null;
 
     return (
-        <div className="rounded-3xl border border-slate-200/80 bg-white/60 shadow-sm backdrop-blur-md">
+        <div className="rounded-3xl border border-white/12 bg-slate-900/60 shadow-lg backdrop-blur-xl">
             <button
                 type="button"
                 onClick={() => setOpen((v) => !v)}
                 className="flex w-full items-center justify-between px-5 py-4 text-left"
             >
                 <div className="flex items-center gap-3">
-                    <span className="rounded-full bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-white">
+                    <span className="rounded-full bg-white/10 px-2.5 py-1 text-[11px] font-medium text-slate-100">
                         {trace.detected_task.replace(/_/g, " ")}
                     </span>
                     <span className="text-xs text-slate-400">
@@ -36,33 +36,33 @@ export default function ExecutionTrace({ trace }: ExecutionTraceProps) {
             </button>
 
             {open && (
-                <div className="space-y-4 border-t border-slate-200/80 px-5 py-4">
+                <div className="space-y-4 border-t border-white/10 px-5 py-4">
                     <div>
-                        <h4 className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-400">
+                        <h4 className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
                             Reasoning
                         </h4>
-                        <p className="text-sm text-slate-700">{trace.reasoning}</p>
+                        <p className="text-sm text-slate-300">{trace.reasoning}</p>
                     </div>
 
                     <div>
-                        <h4 className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-400">
+                        <h4 className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
                             Input validation
                         </h4>
                         <div className="flex flex-wrap gap-1.5">
-                            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-slate-600">
+                            <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
                                 {trace.input_validation.image_count} image
                                 {trace.input_validation.image_count !== 1 ? "s" : ""}
                             </span>
-                            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-slate-600">
+                            <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
                                 {trace.input_validation.modality.join(" + ")}
                             </span>
                             {trace.input_validation.temporal && (
-                                <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-slate-600">
+                                <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
                                     bi-temporal
                                 </span>
                             )}
                             {trace.input_validation.cross_modal && (
-                                <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-slate-600">
+                                <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
                                     cross-modal
                                 </span>
                             )}
@@ -70,7 +70,7 @@ export default function ExecutionTrace({ trace }: ExecutionTraceProps) {
                         {trace.input_validation.warnings.length > 0 && (
                             <ul className="mt-2 space-y-1">
                                 {trace.input_validation.warnings.map((w, i) => (
-                                    <li key={i} className="text-[11px] text-amber-600">
+                                    <li key={i} className="text-[11px] text-amber-400">
                                         ⚠ {w}
                                     </li>
                                 ))}
@@ -79,27 +79,27 @@ export default function ExecutionTrace({ trace }: ExecutionTraceProps) {
                     </div>
 
                     <div>
-                        <h4 className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-400">
+                        <h4 className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
                             Pipeline steps
                         </h4>
                         <div className="space-y-1.5">
                             {trace.pipeline_steps.map((step) => (
                                 <div
                                     key={step.step}
-                                    className="flex items-center justify-between rounded-xl border border-slate-200/80 bg-white px-3 py-2 text-xs"
+                                    className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs"
                                 >
                                     <div className="flex items-center gap-2">
                                         {step.status === "success" ? (
-                                            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                                            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
                                         ) : (
-                                            <XCircle className="h-3.5 w-3.5 text-rose-500" />
+                                            <XCircle className="h-3.5 w-3.5 text-rose-400" />
                                         )}
-                                        <span className="font-medium text-slate-700">
+                                        <span className="font-medium text-slate-300">
                                             {step.model}
                                         </span>
-                                        <span className="text-slate-400">{step.action}</span>
+                                        <span className="text-slate-500">{step.action}</span>
                                     </div>
-                                    <span className="text-slate-400">
+                                    <span className="text-slate-500">
                                         {step.time_ms.toFixed(0)}ms
                                     </span>
                                 </div>

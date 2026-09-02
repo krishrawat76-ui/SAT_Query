@@ -12,6 +12,9 @@ interface QueryInputProps {
     onImagesChange: (images: UploadedImage[]) => void;
     onSubmit: () => void;
     loading: boolean;
+    /** Width (px) of the sidebar currently docked on the left, so the pill
+     * centers within the remaining satellite workspace, not the full viewport. */
+    sidebarWidth: number;
 }
 
 const SUGGESTIONS = [
@@ -29,6 +32,7 @@ export default function QueryInput({
     onImagesChange,
     onSubmit,
     loading,
+    sidebarWidth,
 }: QueryInputProps) {
     const [focused, setFocused] = useState(false);
     const [attachOpen, setAttachOpen] = useState(false);
@@ -94,105 +98,110 @@ export default function QueryInput({
     };
 
     return (
-        <div ref={containerRef} className="relative mx-auto w-full max-w-3xl">
-            {/* Dynamic autocomplete — filters as the user types, shows defaults when empty */}
-            {suggestOpen && filteredSuggestions.length > 0 && (
-                <div className="absolute bottom-full left-0 right-0 z-20 mb-3 overflow-hidden rounded-3xl border border-slate-200/80 bg-white/95 p-2 shadow-lg backdrop-blur-md">
-                    {filteredSuggestions.map((s) => (
-                        <button
-                            key={s}
-                            type="button"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => pickSuggestion(s)}
-                            className="block w-full rounded-2xl px-4 py-2.5 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50"
-                        >
-                            {s}
-                        </button>
-                    ))}
-                </div>
-            )}
+        <div
+            className="fixed bottom-6 z-30 transition-[left] duration-300 ease-in-out"
+            style={{ left: sidebarWidth, right: 0 }}
+        >
+            <div ref={containerRef} className="relative mx-auto w-full max-w-3xl px-4">
+                {/* Dynamic autocomplete — filters as the user types, shows defaults when empty */}
+                {suggestOpen && filteredSuggestions.length > 0 && (
+                    <div className="absolute bottom-full left-4 right-4 z-20 mb-3 overflow-hidden rounded-3xl border border-white/12 bg-slate-900/80 p-2 shadow-2xl backdrop-blur-xl">
+                        {filteredSuggestions.map((s) => (
+                            <button
+                                key={s}
+                                type="button"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => pickSuggestion(s)}
+                                className="block w-full rounded-2xl px-4 py-2.5 text-left text-sm text-slate-200 transition-colors hover:bg-white/10"
+                            >
+                                {s}
+                            </button>
+                        ))}
+                    </div>
+                )}
 
-            {/* Attach popover */}
-            {attachOpen && (
-                <div className="absolute bottom-full left-0 z-20 mb-3">
-                    <ImageUpload
-                        images={images}
-                        onChange={onImagesChange}
-                        onRequestClose={() => setAttachOpen(false)}
-                    />
-                </div>
-            )}
+                {/* Attach popover */}
+                {attachOpen && (
+                    <div className="absolute bottom-full left-4 z-20 mb-3">
+                        <ImageUpload
+                            images={images}
+                            onChange={onImagesChange}
+                            onRequestClose={() => setAttachOpen(false)}
+                        />
+                    </div>
+                )}
 
-            {/* Compact attachment chips, visible whether or not the popover is open */}
-            <AttachmentChips
-                images={images}
-                onRemove={removeImage}
-                onModalityChange={updateModality}
-            />
-
-            <div
-                className={`flex items-end gap-2 rounded-[28px] border bg-white/95 p-2.5 shadow-lg backdrop-blur-md transition-colors ${focused ? "border-slate-300" : "border-slate-200/80"
-                    }`}
-            >
-                <button
-                    type="button"
-                    onClick={() => {
-                        setSuggestOpen(false);
-                        setAttachOpen((v) => !v);
-                    }}
-                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border transition-colors ${attachOpen
-                            ? "border-slate-300 bg-slate-100 text-slate-900"
-                            : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
-                        }`}
-                    aria-label="Attach satellite imagery"
-                >
-                    <Plus className="h-4 w-4" />
-                </button>
-
-                <textarea
-                    ref={textareaRef}
-                    value={query}
-                    onChange={(e) => {
-                        onQueryChange(e.target.value);
-                        setAttachOpen(false);
-                        setSuggestOpen(true);
-                    }}
-                    onKeyDown={handleKeyDown}
-                    onFocus={() => {
-                        setFocused(true);
-                        setAttachOpen(false);
-                        setSuggestOpen(true);
-                    }}
-                    onBlur={() => setFocused(false)}
-                    rows={1}
-                    placeholder="Ask about your satellite imagery..."
-                    className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent px-1 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-400"
+                {/* Compact attachment chips, visible whether or not the popover is open */}
+                <AttachmentChips
+                    images={images}
+                    onRemove={removeImage}
+                    onModalityChange={updateModality}
                 />
 
-                <button
-                    type="button"
-                    onClick={() => {
-                        setSuggestOpen(false);
-                        onSubmit();
-                    }}
-                    disabled={!canSubmit}
-                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white transition-colors enabled:hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
-                    aria-label="Send"
+                <div
+                    className={`flex items-end gap-2 rounded-full border bg-slate-900/60 p-2.5 shadow-2xl backdrop-blur-xl transition-colors ${focused ? "border-white/25" : "border-white/15"
+                        }`}
                 >
-                    {loading ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                        <ArrowUp className="h-4 w-4" />
-                    )}
-                </button>
-            </div>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setSuggestOpen(false);
+                            setAttachOpen((v) => !v);
+                        }}
+                        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full border transition-colors ${attachOpen
+                                ? "border-white/25 bg-white/15 text-slate-100"
+                                : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                            }`}
+                        aria-label="Attach satellite imagery"
+                    >
+                        <Plus className="h-4 w-4" />
+                    </button>
 
-            {images.length === 0 && (
-                <p className="mt-2 px-2 text-center text-xs text-slate-400">
-                    Attach at least one satellite image with the + button to run an
-                    analysis.
-                </p>
-            )}
+                    <textarea
+                        ref={textareaRef}
+                        value={query}
+                        onChange={(e) => {
+                            onQueryChange(e.target.value);
+                            setAttachOpen(false);
+                            setSuggestOpen(true);
+                        }}
+                        onKeyDown={handleKeyDown}
+                        onFocus={() => {
+                            setFocused(true);
+                            setAttachOpen(false);
+                            setSuggestOpen(true);
+                        }}
+                        onBlur={() => setFocused(false)}
+                        rows={1}
+                        placeholder="Ask about your satellite imagery..."
+                        className="max-h-40 min-h-[2.5rem] flex-1 resize-none bg-transparent px-1 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500"
+                    />
+
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setSuggestOpen(false);
+                            onSubmit();
+                        }}
+                        disabled={!canSubmit}
+                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-900 transition-colors enabled:hover:bg-white disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+                        aria-label="Send"
+                    >
+                        {loading ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                            <ArrowUp className="h-4 w-4" />
+                        )}
+                    </button>
+                </div>
+
+                {images.length === 0 && (
+                    <p className="mt-2 px-2 text-center text-xs text-slate-500">
+                        Attach at least one satellite image with the + button to run an
+                        analysis.
+                    </p>
+                )}
+            </div>
         </div>
     );
 }
