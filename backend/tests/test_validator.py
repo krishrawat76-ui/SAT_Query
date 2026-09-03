@@ -62,12 +62,14 @@ def test_two_images_cross_modal():
     os.unlink(p2)
 
 
-def test_reject_no_images():
-    """Reject empty image list."""
+def test_allow_no_images():
+    """0 images is valid — a text-only conversational query, routed to the
+    VQA task's no-image path instead of an image pipeline (see RuleBasedRouter)."""
     validator = InputValidator()
     result = validator.validate([])
-    assert not result.is_valid
-    assert any("No images" in e for e in result.errors)
+    assert result.is_valid
+    assert result.num_images == 0
+    assert result.errors == []
 
 
 def test_reject_three_images():

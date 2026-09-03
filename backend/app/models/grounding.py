@@ -12,6 +12,7 @@ from loguru import logger
 
 from app.models.base import BaseModelWrapper
 from app.output.evidence import overlay_bboxes
+from app.utils.synthesize import synthesize_answer
 
 
 class GroundingModel(BaseModelWrapper):
@@ -76,9 +77,10 @@ class SegmentationModel(BaseModelWrapper):
             image_path, boxes, [target] * len(boxes), scores, request_id
         )
 
+        answer = synthesize_answer(context["query"], [image_path], "grounding", target=target)
         return {
-            "answer": "Model output not available",
-            "confidence": 0.0,
+            "answer": answer,
+            "confidence": 0.3,
             "evidence_images": [],
             "regions": [],
         }

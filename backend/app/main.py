@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from app.api.routes import router
+from app.api.raster import router as raster_router
 from app.utils.config import settings
 
 
@@ -84,3 +85,4 @@ app.mount("/results", StaticFiles(directory=str(settings.RESULTS_DIR)), name="re
 
 # ── API routes ──
 app.include_router(router, prefix="/api")
+app.include_router(raster_router, prefix="/api")

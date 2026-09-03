@@ -10,6 +10,7 @@ In production: reuses Qwen2.5-VL with 2 images + change context.
 from loguru import logger
 
 from app.models.base import BaseModelWrapper
+from app.utils.synthesize import synthesize_answer
 
 
 class ChangeVQAModel(BaseModelWrapper):
@@ -24,11 +25,11 @@ class ChangeVQAModel(BaseModelWrapper):
 
     def run(self, action: str, context: dict) -> dict:
         query = context["query"]
-        change_info = context.get("intermediate", {}).get("step_1", {})
+        images = context["images"]
 
         logger.info(f"[STUB] Change VQA answering: '{query[:50]}...'")
 
         return {
-            "answer": "Model output not available",
-            "confidence": 0.0,
+            "answer": synthesize_answer(query, images, "change"),
+            "confidence": 0.3,
         }

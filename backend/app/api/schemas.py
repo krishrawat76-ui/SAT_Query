@@ -75,3 +75,27 @@ class HealthResponse(BaseModel):
     gpu_available: bool
     gpu_memory_used: Optional[str] = None
     registered_models: Optional[list[dict]] = None
+
+
+class RasterBBox(BaseModel):
+    """4-corner geographic bounding box, in decimal degrees."""
+    north: float
+    south: float
+    east: float
+    west: float
+
+
+class RasterLayers(BaseModel):
+    """URLs for the three stub analysis layers, served from /results."""
+    base: str
+    structural_changes: str
+    spectral_bands: str
+
+
+class ProcessRasterResponse(BaseModel):
+    """Complete API response for POST /api/process-raster (Phase 3 stub)."""
+    bbox: RasterBBox
+    center: list[float]  # [lng, lat]
+    zoom: float
+    layers: RasterLayers
+    source: str  # "geotiff-tags" | "synthetic"

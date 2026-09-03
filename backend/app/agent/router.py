@@ -96,6 +96,18 @@ class RuleBasedRouter:
         mods = input_info.get("modalities", ["optical"])
         is_cross = input_info.get("is_cross_modal", False)
 
+        # ── Text-only (no images) → conversational response, no image pipeline ──
+        if n == 0:
+            return RoutingDecision(
+                task_type=TaskType.VQA,
+                models=["rs_vlm"],
+                pipeline=[
+                    {"step": 1, "model": "rs_vlm", "action": "answer_question"},
+                ],
+                confidence=0.7,
+                reasoning="No images attached → conversational response, no image pipeline run.",
+            )
+
         # ── Cross-modal → always Optical-SAR ──
         if is_cross or (n == 2 and set(mods) == {"optical", "sar"}):
             return RoutingDecision(

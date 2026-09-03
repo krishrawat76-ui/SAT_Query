@@ -73,8 +73,8 @@ class InputValidator:
         )
 
         # ── Count check ──
-        if len(image_paths) == 0:
-            errors.append("No images provided. Please upload 1 or 2 satellite images.")
+        # 0 images is valid — a text-only conversational query. Routed to a
+        # dedicated task in RuleBasedRouter rather than the image pipelines.
         if len(image_paths) > 2:
             errors.append(
                 f"Maximum 2 images allowed, but {len(image_paths)} were provided. "

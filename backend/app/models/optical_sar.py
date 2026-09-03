@@ -13,6 +13,7 @@ from loguru import logger
 
 from app.models.base import BaseModelWrapper
 from app.output.evidence import generate_land_cover_map
+from app.utils.synthesize import synthesize_answer
 
 
 class OpticalSARFusionModel(BaseModelWrapper):
@@ -44,6 +45,6 @@ class OpticalSARFusionModel(BaseModelWrapper):
             "type": "fusion_result",
             "classes": {},
             "evidence_images": [],
-            "answer": "Model output not available",
-            "confidence": 0.0,
+            "answer": synthesize_answer(context["query"], context["images"], "fusion"),
+            "confidence": 0.3,
         }

@@ -19,7 +19,7 @@ router = APIRouter()
 @router.post("/analyze")
 async def analyze(
     request: Request,
-    images: list[UploadFile] = File(...),
+    images: list[UploadFile] = File(default=[]),
     query: str = Form(...),
     modalities: str = Form(default="optical"),
     dates: Optional[str] = Form(default=None),
@@ -35,11 +35,14 @@ async def analyze(
     logger.info(f"[{request_id}] New request — Query: '{query}' | Images: {len(images)}")
 
     # ── 1. Save uploaded images to temp directory ──
+    # Each image gets its own temp dir, so the original filename is kept
+    # (rather than a generic "image_N.ext") — it's echoed back in synthesized
+    # stub answers, and Path(...).name strips any path components for safety.
     image_paths = []
     for i, img_file in enumerate(images):
-        suffix = Path(img_file.filename).suffix or ".png"
+        original_name = Path(img_file.filename or "").name or f"image_{i}.png"
         tmp_dir = Path(tempfile.mkdtemp(prefix="satquery_"))
-        tmp_path = tmp_dir / f"image_{i}{suffix}"
+        tmp_path = tmp_dir / original_name
         content = await img_file.read()
         tmp_path.write_bytes(content)
         image_paths.append(str(tmp_path))

@@ -17,6 +17,7 @@ from loguru import logger
 
 from app.models.base import BaseModelWrapper
 from app.utils.config import settings
+from app.utils.synthesize import synthesize_answer
 
 
 class QwenVLMWrapper(BaseModelWrapper):
@@ -103,9 +104,15 @@ class QwenVLMWrapper(BaseModelWrapper):
     # ── Real inference methods ──
 
     def _vqa(self, context: dict) -> dict:
-        """Single-image Visual Question Answering."""
-        image_path = context["images"][0]
+        """Single-image Visual Question Answering (or a conversational reply
+        when no image was attached — routed here for text-only queries)."""
+        images = context["images"]
         query = context["query"]
+
+        if not images:
+            return {"answer": synthesize_answer(query, [], "vqa"), "confidence": 0.3}
+
+        image_path = images[0]
 
         prompt = (
             "You are a remote sensing expert analyzing satellite imagery. "
@@ -288,9 +295,18 @@ class QwenVLMWrapper(BaseModelWrapper):
     # ── No Output mode (no GPU / no weights) ──
 
     def _mock_run(self, action: str, context: dict) -> dict:
-        """Return 'Model output not available' when model cannot be loaded."""
-        logger.info(f"[NO OUTPUT MODE] Returned empty response for action: {action}")
-        return {
-            "answer": "Model output not available",
-            "confidence": 0.0,
-        }
+        """Synthesize a dynamic, input-aware placeholder when the real model
+        cannot be loaded, instead of a fixed 'Model output not available'."""
+        task_hint = {
+            "answer_question": "vqa",
+            "generate_caption": "caption",
+            "describe_changes": "change",
+            "analyze_fused": "fusion",
+        }.get(action, "vqa")
+
+        answer = synthesize_answer(context["query"], context["images"], task_hint)
+        logger.info(f"[NO OUTPUT MODE] Synthesized placeholder for action: {action}")
+        # Fixed low confidence regardless of text length — this is a templated
+        # placeholder, not a real model output, so word-count heuristics would
+        # be misleading here.
+        return {"answer": answer, "confidence": 0.3}
