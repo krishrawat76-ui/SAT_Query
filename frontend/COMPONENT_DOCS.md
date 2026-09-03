@@ -294,3 +294,244 @@ the full camera choreography for that turn).
    ```bash
    npx tsc --noEmit
    ```
+
+---
+---
+
+# SAT_Query Frontend — Component Documentation (Phase 3 addendum)
+
+> Covers `feature/phase-3-tiff-pipeline`, **appended on top of** the Phase 2
+> reference above (nothing above this line changed meaning — `mapLocations.ts`
+> and `mockResults.ts` it references were deleted this phase; see below).
+> Ground truth for the new `/api/process-raster` payload shape is
+> `backend/app/api/schemas.py`'s `ProcessRasterResponse`, mirrored in
+> `src/types/api.ts`. For a consolidated list of every hardcoded/synthetic
+> value across both phases, see `HARDCODED.md`.
+
+## Updated architecture
+
+```text
+src/
+├── components/
+│   ├── FocusMask.tsx           — 4 blur/dim bands framing the sharp raster rect
+│   ├── LayerSwitcher.tsx       — Base/Structural/Spectral/(Water Mask) tab pill
+│   ├── PinnedQueryCard.tsx     — active turn's query pill, pinned over the map
+│   ├── RadiantCard.tsx         — reusable localized blur-halo wrapper
+│   └── ResultInspectorPanel.tsx — floating right-side result stack (replaces
+│                                  Phase 2's in-flow result card)
+├── hooks/
+│   ├── useRasterOverlay.ts     — POST /api/process-raster + imperative
+│   │                              MapLibre control for the raster/mask layers
+│   └── useTypewriter.ts        — progressive word-reveal for the answer text
+└── lib/
+    ├── geotiffClient.ts        — client-side GeoTIFF tag/pixel reading
+    ├── hardcodedMask.ts        — the "highlight the water body" demo overlay
+    └── syntheticLocation.ts    — last-resort per-file synthetic bbox
+```
+
+`lib/mapLocations.ts` (the Mumbai/DC/London scripted tour) and
+`lib/mockResults.ts` (the offline-mock-answer fallback) are **deleted** —
+`MapTarget` now lives in `hooks/useMapCamera.ts` itself, and a failed
+`/api/analyze` call surfaces a real error instead of a scripted answer.
+
+State flow addition: `page.tsx` now also owns `activeRaster`,
+`hasBaseLayers`, `waterMaskAvailable`, `activeLayerKey`, and `focusRect`,
+plus two imperative refs mirroring the per-turn map: `turnRasterDataRef`
+(each turn's resolved `ProcessRasterResponse`) and `turnWaterMaskRef` (each
+turn's hardcoded mask object URL, if the query triggered one). All raster/
+mask map control is delegated to `useRasterOverlay`, the same way
+`useMapCamera` already owns all camera control — `page.tsx` never touches
+MapLibre sources/layers directly.
+
+## Component reference — new in Phase 3
+
+### `useRasterOverlay` (hook)
+
+```ts
+function useRasterOverlay(): {
+  setMap: (map: maplibregl.Map) => void;
+  processRaster: (file: File) => Promise<ProcessRasterResponse>;
+  showRaster: (bbox: RasterBBox, layers: RasterLayers, active?: LayerKey) => void;
+  setActiveLayer: (active: LayerKey) => void;
+  hideRaster: () => void;
+  getScreenRect: (bbox: RasterBBox) => { left: number; top: number; right: number; bottom: number } | null;
+  showWaterMask: (bbox: RasterBBox, url: string) => void;
+  hideWaterMask: () => void;
+  resolveUrl: (path: string) => string;
+};
+```
+
+- Adds/updates three stacked MapLibre `image` sources (`raster-base`,
+  `raster-structural`, `raster-spectral`) plus a separate
+  `raster-water-mask` source for the hardcoded overlay. Existing sources are
+  updated in place (`setCoordinates` + `updateImage`) rather than
+  removed/re-added, avoiding a flash when a turn is revisited.
+- `setActiveLayer` only flips `raster-opacity` (0/1) per layer — MapLibre's
+  own `raster-opacity-transition: {duration: 300}` animates the crossfade;
+  no camera movement, no manual rAF loop.
+- `getScreenRect` projects the bbox's 4 corners with `map.project(...)` and
+  returns their screen-space bounding rect, or `null` before the map is
+  ready — the single source of truth `FocusMask`, the nav-arrow rail, and
+  the wheel-cycle hover zone all read from (via `page.tsx`'s `focusRect`
+  state, kept live by a `map.on("move", ...)` listener).
+
+### `FocusMask`
+
+```ts
+interface FocusMaskProps {
+  rect: { left: number; top: number; right: number; bottom: number } | null;
+}
+```
+
+Renders `null` when `rect` is `null` (mirrors `CloudTransition`'s idle
+convention). Otherwise 4 `fixed z-[5]` bands (`backdrop-blur-[0.7px]
+bg-slate-950/2`) covering everywhere outside `rect` — left/right run full
+viewport height; top/bottom are constrained to `rect`'s own left..right
+span so no band double-covers a corner.
+
+### `LayerSwitcher`
+
+```ts
+type SwitcherKey = LayerKey | "water_mask";
+interface LayerSwitcherProps {
+  visible: boolean;
+  active: SwitcherKey;
+  onChange: (key: SwitcherKey) => void;
+  hasBaseLayers?: boolean;
+  waterMaskAvailable?: boolean;
+}
+```
+
+- Tab list is `[...(hasBaseLayers ? 3 base tabs : []), ...(waterMaskAvailable
+  ? [waterMaskTab] : [])]` — a turn with only a hardcoded mask (backend
+  never ran) shows just that one tab, not 3 dead ones pointing at imagery
+  that doesn't exist.
+- `onChange` only ever calls `useRasterOverlay`'s paint-property setters —
+  never anything in `useMapCamera` — so switching tabs structurally cannot
+  retrigger a camera flight.
+- Supports a left/right swipe gesture (`drag="x"`, snaps back via
+  `dragConstraints`) in addition to click; wheel-to-cycle was moved off this
+  component and onto hovering the raster/mask area on the map itself (see
+  `page.tsx::cycleActiveLayerFromWheel`).
+
+### `PinnedQueryCard`
+
+```ts
+interface PinnedQueryCardProps {
+  turn: ConversationTurn | null;
+  rect: { left: number; top: number; right: number; bottom: number } | null;
+  sidebarWidthPx: number;
+  hidden: boolean;
+}
+```
+
+Positioned `rect.top - 60` (clamped to a minimum of 16px from the top) so it
+sits just above the framed raster extent; `hidden` (true once the same
+turn's result section is revealed) drives its exit animation rather than
+unmounting abruptly, since the query then continues to live inside
+`ResultInspectorPanel`'s own header.
+
+### `ResultInspectorPanel`
+
+```ts
+interface ResultInspectorPanelProps {
+  turn: ConversationTurn | null; // revealedTurnId in page.tsx
+  retryDisabled: boolean;
+  onRetry: (turnId: string) => void;
+}
+// exports PANEL_SIDE_MARGIN = 24, PANEL_WIDTH = 440
+```
+
+Fixed-width (440px) floating right-side panel, vertically centered between
+`PANEL_TOP_MARGIN` (40px) and `PANEL_BOTTOM_CLEARANCE` (200px, clears the
+layer-switcher/chat-input cluster). Holds the query header + `ResultPanel` +
+`ExecutionTrace` + `MessageActions` as one internally-scrollable stack
+(plain `overflow-y-auto`, deliberately no scroll-edge fade mask — see
+`CHANGELOG.md`'s rendering-bug-fixes section for why). Replaces Phase 2's
+in-flow result card entirely; the map/raster/focus-mask remain visible on
+the left at all times.
+
+### `RadiantCard`
+
+```ts
+interface RadiantCardProps {
+  children: ReactNode;
+  className?: string;
+  haloInset?: number;   // default 32
+  hideHalo?: boolean;   // default false
+}
+```
+
+Generic wrapper: renders an unstyled `relative` div containing (1) an
+optional blur-halo sibling (`-inset-{haloInset}`, `rounded-[3rem]`,
+`backdrop-blur-2xl`, radial `mask-image` feathering the edge) positioned
+*before* `children` in DOM order so it paints behind them, then (2)
+`children` itself. Used by the chat input pill; deliberately *not* used by
+the attach/upload popover (a halo read as a hazy smudge against busy
+uploaded imagery there) or the suggestion popover (which manages its own
+halo directly, outside `AnimatePresence`, for instant removal on close).
+
+### `useTypewriter` (hook)
+
+```ts
+function useTypewriter(text: string | null | undefined, wordsPerTick?: number, tickMs?: number): string;
+```
+
+Defaults: 2 words per 28ms tick. Purely a client-side reveal effect over an
+already-fully-arrived string — the backend has no real token streaming.
+
+### `useMapCamera` — Phase 3 additions
+
+```ts
+flyToBoundsSimple(bounds: [[number, number], [number, number]], padding: FramePadding, durationMs?: number): void;
+```
+
+`fitBounds`-based counterpart to `flyToSimple`, used for scroll-driven
+recall of a turn with real raster data so revisiting it reproduces the same
+UI-aware framing as the original cinematic flight. `runFivePhaseFlight`
+gained two optional trailing params (`targetBounds`, `padding`) — when both
+are given, phase 5 ("precision lock") calls `fitBounds` against the real
+bbox instead of a manual `flyTo(center, zoom)`.
+
+## `lib/` reference — new in Phase 3
+
+### `geotiffClient.ts`
+
+- `extractGeoTiffLocation(file): Promise<ClientGeoTiffLocation | null>` —
+  real GeoTIFF tag reading + WGS84/UTM reprojection, entirely client-side
+  (`geotiff` + `proj4`), used as the fallback tier when
+  `/api/process-raster` is unreachable.
+- `getGeoTiffDimensions(file): Promise<{width, height} | null>` — tag-only
+  (no pixel decode), succeeds even for compression codecs the library can't
+  decode pixels for; used to size a placeholder mask.
+- `decodeGeoTiffPreview(file, maxDim=1024): Promise<string | null>` —
+  actual pixel decode to a PNG object URL, downsampled; returns `null` (not
+  a throw) for an unsupported codec such as JPEG2000.
+
+### `hardcodedMask.ts`
+
+- `isWaterHighlightQuery(query): boolean` — regex trigger, see `HARDCODED.md`.
+- `generateWaterBodyMaskUrl(sourceUrl): Promise<string>` — draws the fixed
+  translucent ellipse over a real preview image.
+- `generatePlaceholderMaskUrl(width, height): Promise<string>` — same
+  ellipse over a flat slate background, for when no real preview could be
+  decoded at all.
+
+### `syntheticLocation.ts`
+
+- `syntheticRasterFallback(file): ProcessRasterResponse` — deterministic,
+  file-hashed bbox anchored to one of 3 fixed demo cities, with
+  `layers.base` left empty as a signal to skip the raster overlay entirely.
+
+## Updated component props
+
+- **`QueryInput`** gained `layerSwitcherVisible`, `activeLayer`,
+  `onActiveLayerChange`, `hasBaseLayers`, `waterMaskAvailable` (renders
+  `LayerSwitcher` in its existing popover slot, above the pill) — also
+  restructured internally around a single shared alignment wrapper for the
+  suggestion popover and the input pill, see `CHANGELOG.md`.
+- **`ResultPanel`** now runs `result.answer` through `useTypewriter` before
+  rendering it.
+- **`SatelliteMap`**'s `MapTarget` import moved from the now-deleted
+  `lib/mapLocations.ts` to `hooks/useMapCamera.ts`, where the type is now
+  defined.
