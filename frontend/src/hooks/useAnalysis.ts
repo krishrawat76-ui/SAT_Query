@@ -22,7 +22,14 @@ export function useAnalysis() {
       const res = await axios.post(`${API}/api/analyze`, form, { timeout: 120000 });
       setResult(res.data);
     } catch (e: any) {
-      setError(e.response?.data?.detail?.errors?.join(", ") || e.message || "An error occurred");
+      if (e.response) {
+        setError(e.response.data?.detail?.errors?.join(", ") || e.message || "An error occurred");
+      } else {
+        // No response at all — the request never reached the server (backend
+        // down, wrong NEXT_PUBLIC_API_URL, CORS, etc). Axios's own message
+        // for this is just "Network Error", which isn't actionable.
+        setError(`Couldn't reach the backend at ${API} — make sure it's running.`);
+      }
     } finally {
       setLoading(false);
     }

@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import * as maplibregl from "maplibre-gl";
 import type { StyleSpecification } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import type { MapTarget } from "@/lib/mapLocations";
+import type { MapTarget } from "@/hooks/useMapCamera";
 
 interface SatelliteMapProps {
     /** Only used for the very first render — all movement after mount is

@@ -188,7 +188,7 @@ export default function Sidebar({
                                         type="button"
                                         onClick={() => onSelectSession(session.id)}
                                         title={session.title}
-                                        className="flex min-w-0 flex-1 items-center gap-3"
+                                        className={`flex min-w-0 flex-1 items-center gap-3 ${collapsed ? "justify-center" : ""}`}
                                     >
                                         <MessageSquare className="h-3.5 w-3.5 shrink-0" strokeWidth={1.75} />
                                         {!collapsed && (

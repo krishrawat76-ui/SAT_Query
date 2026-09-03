@@ -2,8 +2,25 @@
 
 import { useRef } from "react";
 import * as maplibregl from "maplibre-gl";
-import type { MapTarget } from "@/lib/mapLocations";
 import { flightDurationForDistance, haversineDistanceKm, macroZoomForDistance } from "@/lib/flightPlan";
+
+export interface MapTarget {
+    center: [number, number];
+    zoom: number;
+    durationMs?: number;
+}
+
+/** CSS-pixel clearance to leave around a `fitBounds` target on each edge —
+ * so pinned UI chrome (the query card near the top, the input bar/layer
+ * switcher at the bottom) never overlaps the framed raster extent. */
+export interface FramePadding {
+    top: number;
+    bottom: number;
+    left: number;
+    right: number;
+}
+
+type LngLatBounds = [[number, number], [number, number]];
 
 const PIN_COLOR = "#ef4444";
 
@@ -87,6 +104,19 @@ export function useMapCamera() {
         updateMarker(options?.showMarker === false ? null : target.center);
     };
 
+    /** Same role as `flyToSimple`, but frames a raster's real bbox with
+     * `fitBounds` instead of a plain center/zoom — used for scroll-driven
+     * recall of a turn that has raster data, so revisiting it lands on
+     * exactly the same UI-aware framing as the initial cinematic flight. */
+    const flyToBoundsSimple = (bounds: LngLatBounds, padding: FramePadding, durationMs = 900) => {
+        const map = mapRef.current;
+        if (!map) return;
+        cancelFlight();
+        map.fitBounds(bounds, { padding, duration: durationMs, essential: true });
+        const center: [number, number] = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
+        updateMarker(center);
+    };
+
     /**
      * 5 equal-duration phases: source breakout -> macro ascent -> high-
      * altitude traversal (tiles stay sharp — no blur) -> approach descent ->
@@ -98,7 +128,9 @@ export function useMapCamera() {
         startZoom: number,
         targetCoords: [number, number],
         targetZoom: number,
-        onComplete?: () => void
+        onComplete?: () => void,
+        targetBounds?: LngLatBounds,
+        padding?: FramePadding
     ) => {
         const map = mapRef.current;
         if (!map) return;
@@ -160,14 +192,29 @@ export function useMapCamera() {
 
                     const t4 = window.setTimeout(() => {
                         if (!isCurrent()) return;
-                        // Phase 5 — precision zoom-in and lock onto the pin.
-                        map.flyTo({
-                            center: targetCoords,
-                            zoom: targetZoom,
-                            duration: phaseMs,
-                            essential: true,
-                            easing: (t) => 1 - Math.pow(1 - t, 3),
-                        });
+                        // Phase 5 — precision lock. With a real bbox, fitBounds
+                        // frames the raster's true extent with UI-aware padding
+                        // (letting MapLibre compute the exact zoom itself, sidestepping
+                        // any manual zoom-formula error); otherwise a plain
+                        // center/zoom flyTo (e.g. the ocean reset, which has
+                        // no bbox to fit).
+                        const snapEasing = (t: number) => 1 - Math.pow(1 - t, 3);
+                        if (targetBounds && padding) {
+                            map.fitBounds(targetBounds, {
+                                padding,
+                                duration: phaseMs,
+                                essential: true,
+                                easing: snapEasing,
+                            });
+                        } else {
+                            map.flyTo({
+                                center: targetCoords,
+                                zoom: targetZoom,
+                                duration: phaseMs,
+                                essential: true,
+                                easing: snapEasing,
+                            });
+                        }
 
                         const t5 = window.setTimeout(() => {
                             if (isCurrent()) onComplete?.();
@@ -183,5 +230,5 @@ export function useMapCamera() {
         timeoutsRef.current.push(t1);
     };
 
-    return { setMap, cancelFlight, getCurrentPosition, flyToSimple, runFivePhaseFlight };
+    return { setMap, cancelFlight, getCurrentPosition, flyToSimple, flyToBoundsSimple, runFivePhaseFlight };
 }

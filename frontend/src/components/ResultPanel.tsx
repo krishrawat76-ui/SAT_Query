@@ -1,6 +1,7 @@
 "use client";
 
 import { ImageOff } from "lucide-react";
+import { useTypewriter } from "@/hooks/useTypewriter";
 import type { AnalysisResponse } from "@/types/api";
 
 interface ResultPanelProps {
@@ -44,8 +45,10 @@ function Skeleton() {
 }
 
 export default function ResultPanel({ result, loading, error }: ResultPanelProps) {
+    const typedAnswer = useTypewriter(result?.answer);
+
     return (
-        <div className="rounded-3xl rounded-tl-sm border border-white/12 bg-slate-900/70 p-6 shadow-2xl backdrop-blur-xl">
+        <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-2xl backdrop-blur-xl">
             <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-medium text-slate-100">Result</h2>
                 {result && (
@@ -80,7 +83,7 @@ export default function ResultPanel({ result, loading, error }: ResultPanelProps
             {!loading && !error && result && (
                 <div className="space-y-5">
                     <p className="text-sm leading-relaxed text-slate-200">
-                        {result.answer}
+                        {typedAnswer}
                     </p>
 
                     {result.evidence.images.length > 0 && (

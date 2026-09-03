@@ -4,20 +4,55 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import QueryInput from "@/components/QueryInput";
-import ResultPanel from "@/components/ResultPanel";
-import ExecutionTrace from "@/components/ExecutionTrace";
-import MessageActions from "@/components/MessageActions";
+import ResultInspectorPanel, { PANEL_SIDE_MARGIN, PANEL_WIDTH } from "@/components/ResultInspectorPanel";
 import LibraryDrawer from "@/components/LibraryDrawer";
 import SatelliteMap from "@/components/SatelliteMap";
 import CloudTransition, { type CloudPhase } from "@/components/CloudTransition";
+import FocusMask from "@/components/FocusMask";
+import PinnedQueryCard from "@/components/PinnedQueryCard";
 import { useAnalysis } from "@/hooks/useAnalysis";
-import { useMapCamera } from "@/hooks/useMapCamera";
-import { getTurnLocation, IDLE_VIEW } from "@/lib/mapLocations";
-import { getMockResult } from "@/lib/mockResults";
-import type { ChatSession, ConversationTurn, UploadedImage } from "@/types/api";
+import { useMapCamera, type MapTarget, type FramePadding } from "@/hooks/useMapCamera";
+import { useRasterOverlay } from "@/hooks/useRasterOverlay";
+import { type SwitcherKey } from "@/components/LayerSwitcher";
+import { syntheticRasterFallback } from "@/lib/syntheticLocation";
+import { extractGeoTiffLocation, decodeGeoTiffPreview, getGeoTiffDimensions } from "@/lib/geotiffClient";
+import { isWaterHighlightQuery, generateWaterBodyMaskUrl, generatePlaceholderMaskUrl } from "@/lib/hardcodedMask";
+import type { ChatSession, ConversationTurn, ProcessRasterResponse, RasterBBox, UploadedImage } from "@/types/api";
 
 const SIDEBAR_EXPANDED_WIDTH = 288;
 const SIDEBAR_COLLAPSED_WIDTH = 72;
+
+// Open-ocean establishing view shown before any turn has a real location —
+// the original Phase 2 idle/"New chat" view.
+const IDLE_OCEAN_VIEW: MapTarget = { center: [-150.0, 5.0], zoom: 11 };
+
+function boundsFromBbox(bbox: RasterBBox): [[number, number], [number, number]] {
+  return [
+    [bbox.west, bbox.south],
+    [bbox.east, bbox.north],
+  ];
+}
+
+// ResultInspectorPanel's fixed footprint (`right-6` + `w-[440px]`, see
+// ResultInspectorPanel.tsx) plus a little breathing room — kept in the right
+// padding below so the raster frame clears it too, not just the bottom bar.
+const RESULT_PANEL_CLEARANCE_PX = 24 + 440 + 36;
+
+// Two framing profiles for the same raster bbox, matched to which section of
+// the turn is in view: "landing" is the first stage the camera settles on
+// (roughly centered — nothing but the pinned query card above it yet), and
+// "result" is a quick re-fit that shifts the frame left once the user
+// scrolls down, clearing room for the ResultInspectorPanel on the right.
+// `sidebarWidthPx` extends the left margin so framing isn't pushed under
+// the docked sidebar.
+function landingFramePadding(sidebarWidthPx: number): FramePadding {
+  return { top: 120, bottom: 180, left: 60 + sidebarWidthPx, right: 60 };
+}
+function resultFramePadding(sidebarWidthPx: number): FramePadding {
+  return { top: 120, bottom: 180, left: 60 + sidebarWidthPx, right: RESULT_PANEL_CLEARANCE_PX };
+}
+
+const SWITCHER_BASE_ORDER: SwitcherKey[] = ["base", "structural_changes", "spectral_bands"];
 
 function createSession(): ChatSession {
   return {
@@ -42,15 +77,41 @@ export default function Home() {
   const resultElementsRef = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const camera = useMapCamera();
+  const rasterOverlay = useRasterOverlay();
   const [cloudPhase, setCloudPhase] = useState<CloudPhase>("idle");
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [revealedTurnId, setRevealedTurnId] = useState<string | null>(null);
+  const [activeRaster, setActiveRaster] = useState<ProcessRasterResponse | null>(null);
+  const [activeLayerKey, setActiveLayerKey] = useState<SwitcherKey>("base");
+  // Whether the current turn has real backend-generated layer imagery, vs.
+  // only (or additionally) a hardcoded water mask — these are independent:
+  // a mask can exist even when the backend never ran for this turn.
+  const [hasBaseLayers, setHasBaseLayers] = useState(false);
+  const [waterMaskAvailable, setWaterMaskAvailable] = useState(false);
+  const [focusRect, setFocusRect] = useState<{ left: number; top: number; right: number; bottom: number } | null>(null);
   const isTransitioningRef = useRef(false);
   const activeMapTurnIdRef = useRef<string | null>(null);
+  // Which fitBounds padding profile the camera is currently framed with —
+  // "landing" (centered, first stage) vs "result" (shifted left to clear
+  // the ResultInspectorPanel). Tracked separately from activeMapTurnIdRef
+  // since the stage can change (scrolling landing<->result) without the
+  // active turn itself changing.
+  const framedStageRef = useRef<"landing" | "result" | null>(null);
   const cloudTimeoutsRef = useRef<number[]>([]);
   const preFlightDelayRef = useRef<number | null>(null);
+  // Per-turn raster data, read imperatively at flight-completion/recall time
+  // so the camera system never waits on a React re-render to know about it.
+  // A turn with no entry here is either text-only or its raster call hasn't
+  // resolved yet — either way, the camera never moves for it.
+  const turnRasterDataRef = useRef<Map<string, ProcessRasterResponse>>(new Map());
+  // Per-turn hardcoded water-mask URL (see lib/hardcodedMask.ts) — set only
+  // when the turn's query matched the "highlight the water body" pattern and
+  // mask generation succeeded.
+  const turnWaterMaskRef = useRef<Map<string, string>>(new Map());
 
   const { analyze, result, loading, error } = useAnalysis();
+
+  const sidebarWidthPx = sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH;
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) ?? sessions[0];
   const activeTurnIndex = activeSession?.turns.findIndex((t) => t.id === activeTurnId) ?? -1;
@@ -59,8 +120,6 @@ export default function Home() {
     activeTurnIndex !== -1 && activeTurnIndex < (activeSession?.turns.length ?? 0) - 1;
 
   // Attribute the (single-shot) hook's async state to whichever turn triggered it.
-  // A network error falls back to the scripted demo result so the Mumbai/DC
-  // camera choreography stays visually verifiable without a live backend.
   useEffect(() => {
     const pending = pendingTurnRef.current;
     if (!pending) return;
@@ -68,16 +127,13 @@ export default function Home() {
     setSessions((prev) =>
       prev.map((s) => {
         if (s.id !== pending.sessionId) return s;
-        const turnIndex = s.turns.findIndex((t) => t.id === pending.turnId);
         return {
           ...s,
-          turns: s.turns.map((t) => {
-            if (t.id !== pending.turnId) return t;
-            if (!loading && error) {
-              return { ...t, loading: false, result: getMockResult(turnIndex), error: null };
-            }
-            return { ...t, loading, result: result ?? t.result, error: error ?? null };
-          }),
+          turns: s.turns.map((t) =>
+            t.id === pending.turnId
+              ? { ...t, loading, result: result ?? t.result, error: error ?? null }
+              : t
+          ),
         };
       })
     );
@@ -106,22 +162,199 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Shows a turn's raster overlay on the map and (re)computes the focus-mask
+  // screen rect. `recomputeDelayMs` accounts for an in-flight camera move —
+  // the geographic bbox is unchanged, but its screen-space projection is
+  // only valid once the camera actually lands there.
+  const showRasterForTurn = (turnId: string, raster: ProcessRasterResponse, recomputeDelayMs = 0) => {
+    const hasBase = !!raster.layers.base;
+    const maskUrl = turnWaterMaskRef.current.get(turnId);
+
+    // Nothing real to show at all — no backend imagery for this turn (e.g.
+    // synthetic/client-only fallback location) and no hardcoded mask either.
+    if (!hasBase && !maskUrl) {
+      setActiveRaster(null);
+      setHasBaseLayers(false);
+      setWaterMaskAvailable(false);
+      setFocusRect(null);
+      return;
+    }
+
+    if (hasBase) {
+      rasterOverlay.showRaster(raster.bbox, raster.layers, "base");
+    }
+    setActiveRaster(raster);
+    setHasBaseLayers(hasBase);
+
+    if (maskUrl) {
+      rasterOverlay.showWaterMask(raster.bbox, maskUrl);
+      setActiveLayerKey("water_mask");
+      setWaterMaskAvailable(true);
+    } else {
+      setActiveLayerKey("base");
+      setWaterMaskAvailable(false);
+    }
+
+    if (recomputeDelayMs > 0) {
+      window.setTimeout(() => {
+        if (activeMapTurnIdRef.current === turnId) {
+          setFocusRect(rasterOverlay.getScreenRect(raster.bbox));
+        }
+      }, recomputeDelayMs);
+    } else {
+      setFocusRect(rasterOverlay.getScreenRect(raster.bbox));
+    }
+  };
+
+  // Whichever layer tabs actually exist right now, in display order — the
+  // same computation LayerSwitcher does internally, needed here too so
+  // wheel-cycling (below) can step through exactly the visible tabs.
+  const availableSwitcherTabs = (): SwitcherKey[] => [
+    ...(hasBaseLayers ? SWITCHER_BASE_ORDER : []),
+    ...(waterMaskAvailable ? (["water_mask"] as SwitcherKey[]) : []),
+  ];
+
+  const handleActiveLayerChange = (key: SwitcherKey) => {
+    setActiveLayerKey(key);
+    if (key === "water_mask") {
+      const maskUrl = activeTurnId ? turnWaterMaskRef.current.get(activeTurnId) : undefined;
+      if (activeRaster && maskUrl) rasterOverlay.showWaterMask(activeRaster.bbox, maskUrl);
+    } else {
+      rasterOverlay.hideWaterMask();
+      rasterOverlay.setActiveLayer(key);
+    }
+  };
+
+  // Scrolling while hovering over the focused raster/mask area cycles
+  // through its available layers — the taskbar itself no longer has its own
+  // wheel handler (see LayerSwitcher.tsx), so this is the only place scroll
+  // drives layer switching now. A trackpad swipe fires many wheel events
+  // (not just one), so without a cooldown a single gesture would race
+  // through several layers at once — this locks to one step per gesture,
+  // then briefly ignores further deltas until the gesture has clearly ended.
+  const wheelCooldownRef = useRef(false);
+  const cycleActiveLayerFromWheel = (deltaY: number) => {
+    if (wheelCooldownRef.current) return;
+    const tabs = availableSwitcherTabs();
+    if (tabs.length === 0) return;
+    const currentIndex = Math.max(0, tabs.indexOf(activeLayerKey));
+    const nextIndex = ((currentIndex + (deltaY > 0 ? 1 : -1)) % tabs.length + tabs.length) % tabs.length;
+    if (tabs[nextIndex] === activeLayerKey) return;
+    handleActiveLayerChange(tabs[nextIndex]);
+    wheelCooldownRef.current = true;
+    window.setTimeout(() => {
+      wheelCooldownRef.current = false;
+    }, 700);
+  };
+
+  // Settles all the non-camera bookkeeping for a turn that has no location —
+  // a text-only query, or one whose raster stub call failed. The camera is
+  // deliberately left untouched: no panning when there's nothing to pan to.
+  const settleOnTextOnlyTurn = (turnId: string) => {
+    cloudTimeoutsRef.current.forEach((id) => clearTimeout(id));
+    cloudTimeoutsRef.current = [];
+    if (preFlightDelayRef.current) {
+      clearTimeout(preFlightDelayRef.current);
+      preFlightDelayRef.current = null;
+    }
+    isTransitioningRef.current = false;
+    activeMapTurnIdRef.current = turnId;
+    framedStageRef.current = null;
+    setActiveTurnId(turnId);
+    setRevealedTurnId(null);
+    setCloudPhase("idle");
+    rasterOverlay.hideRaster();
+    setActiveRaster(null);
+    setHasBaseLayers(false);
+    setWaterMaskAvailable(false);
+    setFocusRect(null);
+  };
+
   // Map-first camera recall: settle the camera on whichever turn's arrival
-  // section is in view. The result card for that turn only appears once its
-  // own section is scrolled into view (handled by the observer below).
-  const recallCamera = (turnId: string, turnIndex: number) => {
-    if (isTransitioningRef.current || activeMapTurnIdRef.current === turnId) return;
+  // section is in view. Only turns with real raster-derived coordinates move
+  // the camera — a text-only turn just hides any prior overlay in place.
+  // `stage` matters because scrolling *backward* through turns reaches a
+  // turn's "result" section before its "landing" section (DOM order per turn
+  // is landing-then-result, so going up from turn N you land on turn N-1's
+  // result next) — without this, that turn would only ever get framed once
+  // you scrolled one snap-step further to its landing section, leaving the
+  // map stuck showing the previous turn's raster while the panel already
+  // shows this turn's result.
+  const recallCamera = (turnId: string, stage: "landing" | "result" = "landing") => {
+    if (isTransitioningRef.current) return;
+    if (activeMapTurnIdRef.current === turnId) {
+      // Already the active turn on the map — just make sure it's framed for
+      // the stage being scrolled into.
+      reframeForStage(turnId, stage);
+      return;
+    }
 
     activeMapTurnIdRef.current = turnId;
     setActiveTurnId(turnId);
-    setRevealedTurnId(null);
+    setRevealedTurnId(stage === "result" ? turnId : null);
 
-    const location = getTurnLocation(turnIndex);
-    camera.flyToSimple({ center: location.center, zoom: location.zoom, durationMs: 900 });
+    const raster = turnRasterDataRef.current.get(turnId);
+    if (raster) {
+      const padding = stage === "landing" ? landingFramePadding(sidebarWidthPx) : resultFramePadding(sidebarWidthPx);
+      camera.flyToBoundsSimple(boundsFromBbox(raster.bbox), padding, 900);
+      framedStageRef.current = stage;
+      showRasterForTurn(turnId, raster, 900);
+    } else {
+      framedStageRef.current = null;
+      rasterOverlay.hideRaster();
+      setActiveRaster(null);
+      setHasBaseLayers(false);
+      setWaterMaskAvailable(false);
+      setFocusRect(null);
+    }
   };
 
-  // Scroll-driven behavior: the "landing" section recalls the camera; the
-  // "result" section (reached only by scrolling further down) reveals the card.
+  // Quick re-fit between the "landing" (centered) and "result" (shifted left
+  // to clear the ResultInspectorPanel) framing profiles for the SAME turn —
+  // used when the user scrolls between a turn's own landing/result sections,
+  // as opposed to recallCamera's full switch to a different turn entirely.
+  const reframeForStage = (turnId: string, stage: "landing" | "result") => {
+    if (framedStageRef.current === stage) return;
+    const raster = turnRasterDataRef.current.get(turnId);
+    if (!raster) return;
+    const padding = stage === "landing" ? landingFramePadding(sidebarWidthPx) : resultFramePadding(sidebarWidthPx);
+    const durationMs = 700;
+    camera.flyToBoundsSimple(boundsFromBbox(raster.bbox), padding, durationMs);
+    framedStageRef.current = stage;
+    window.setTimeout(() => {
+      if (activeMapTurnIdRef.current === turnId) setFocusRect(rasterOverlay.getScreenRect(raster.bbox));
+    }, durationMs);
+  };
+
+  // Both padding profiles above are sidebar-width-aware — without this, an
+  // already-framed rect would go stale (no longer actually centered/offset
+  // correctly) the moment the sidebar collapses or expands, since nothing
+  // else would trigger a re-fit. Re-fits at whatever stage is currently
+  // framed, for the currently active turn only.
+  useEffect(() => {
+    const turnId = activeMapTurnIdRef.current;
+    const stage = framedStageRef.current;
+    if (!turnId || !stage) return;
+    const raster = turnRasterDataRef.current.get(turnId);
+    if (!raster) return;
+    const padding = stage === "landing" ? landingFramePadding(sidebarWidthPx) : resultFramePadding(sidebarWidthPx);
+    // Matches Sidebar.tsx's own `duration-300` width transition exactly —
+    // previously this ran 500ms against a 300ms sidebar animation, so the
+    // map (and everything derived from focusRect, like the nav arrow) kept
+    // visibly sliding for 200ms after the sidebar had already stopped,
+    // reading as two disjointed phases of motion instead of one.
+    const durationMs = 300;
+    camera.flyToBoundsSimple(boundsFromBbox(raster.bbox), padding, durationMs);
+    window.setTimeout(() => {
+      if (activeMapTurnIdRef.current === turnId) setFocusRect(rasterOverlay.getScreenRect(raster.bbox));
+    }, durationMs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sidebarWidthPx]);
+
+  // Scroll-driven behavior: the "landing" section recalls the camera (framed
+  // centered, the first stage); the "result" section (reached only by
+  // scrolling further down) reveals the card and re-frames left to clear
+  // room for it.
   useEffect(() => {
     const root = scrollContainerRef.current;
     if (!root || !activeSession) return;
@@ -134,14 +367,27 @@ export default function Home() {
           const turnId = el.dataset.turnId;
           const section = el.dataset.section;
           if (!turnId) continue;
-
-          const turnIndex = activeSession.turns.findIndex((t) => t.id === turnId);
-          if (turnIndex === -1) continue;
+          if (!activeSession.turns.some((t) => t.id === turnId)) continue;
 
           if (section === "landing") {
-            if (!isTransitioningRef.current) recallCamera(turnId, turnIndex);
+            if (isTransitioningRef.current) continue;
+            if (activeMapTurnIdRef.current === turnId) {
+              // Scrolled back up from this same turn's result section —
+              // retract the panel too, not just the camera framing, so the
+              // whole "first stage" presentation comes back together.
+              setRevealedTurnId((prev) => (prev === turnId ? null : prev));
+              reframeForStage(turnId, "landing");
+            } else {
+              recallCamera(turnId);
+            }
           } else if (section === "result") {
+            if (isTransitioningRef.current) continue;
             setRevealedTurnId(turnId);
+            // Scrolling backward can reach a turn's result section directly,
+            // before its own landing section — recallCamera handles both the
+            // "already active, just reframe" and "switch to a different
+            // turn, framed straight for result" cases.
+            recallCamera(turnId, "result");
           }
         }
       },
@@ -158,13 +404,29 @@ export default function Home() {
     const target = activeSession?.turns[turnIndex];
     if (!target) return;
     landingElementsRef.current.get(target.id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-    recallCamera(target.id, turnIndex);
+    recallCamera(target.id);
+    // The smooth scroll above passes through whatever sections sit between
+    // here and the target — e.g. jumping forward crosses the CURRENT
+    // turn's own "result" section along the way — and each one crossing
+    // the 0.5 intersection threshold would otherwise fire the scroll
+    // observer mid-transit, redirecting the camera to THAT section's turn
+    // instead of the one actually requested. isTransitioningRef is exactly
+    // the guard the observer already checks for this; jumpToTurn just
+    // wasn't setting it, so this race was live on every arrow click. It's
+    // set *after* the recallCamera call above (not before) since
+    // recallCamera has this same guard at its own top — setting it first
+    // would make that direct call a no-op too.
+    isTransitioningRef.current = true;
+    window.setTimeout(() => {
+      isTransitioningRef.current = false;
+    }, 700);
   };
 
   // Quick smoke puff masks only the very start of the switch — the flight
   // itself (the hook's 5-phase sequence) runs fully visible and sharp,
-  // landing directly on the target with no result card yet.
-  const runCloudFlight = (location: { center: [number, number]; zoom: number }, turnId: string) => {
+  // landing directly on the target with no result card yet. Only ever called
+  // for a turn with real raster-derived coordinates.
+  const runCloudFlight = (raster: ProcessRasterResponse, turnId: string) => {
     cloudTimeoutsRef.current.forEach((id) => clearTimeout(id));
     cloudTimeoutsRef.current = [];
     isTransitioningRef.current = true;
@@ -177,13 +439,38 @@ export default function Home() {
     camera.cancelFlight();
     const { center: startCoords, zoom: startZoom } = camera.getCurrentPosition();
 
+    // Hide whatever the previous turn was showing for the duration of the
+    // flight — it re-appears (for this turn) on arrival.
+    rasterOverlay.hideRaster();
+    setActiveRaster(null);
+    setHasBaseLayers(false);
+    setWaterMaskAvailable(false);
+    setFocusRect(null);
+
     const coverMs = 300;
     const clearMs = 900;
 
     setCloudPhase("covering");
-    camera.runFivePhaseFlight(startCoords, startZoom, location.center, location.zoom, () => {
-      isTransitioningRef.current = false;
-    });
+    // Phase 5 fits the raster's real bbox with UI-aware padding via
+    // fitBounds — `raster.center`/`raster.zoom` still drive the earlier
+    // breakout/ascent/traversal/approach phases. Lands framed in the
+    // centered "landing" stage — the result panel isn't shown yet, so
+    // there's no need to shift left for it until the user actually scrolls
+    // down (see reframeForStage).
+    camera.runFivePhaseFlight(
+      startCoords,
+      startZoom,
+      raster.center,
+      raster.zoom,
+      () => {
+        isTransitioningRef.current = false;
+        const latest = turnRasterDataRef.current.get(turnId);
+        if (latest) showRasterForTurn(turnId, latest);
+      },
+      boundsFromBbox(raster.bbox),
+      landingFramePadding(sidebarWidthPx)
+    );
+    framedStageRef.current = "landing";
 
     const clearTimer = window.setTimeout(() => setCloudPhase("clearing"), coverMs);
     const idleTimer = window.setTimeout(() => setCloudPhase("idle"), coverMs + clearMs);
@@ -192,18 +479,116 @@ export default function Home() {
 
   // Simulates a brief AI routing/processing beat before the camera commits to
   // a destination — 60-300ms, randomized per call so it never feels canned.
-  const scheduleCameraFlight = (location: { center: [number, number]; zoom: number }, turnId: string) => {
+  // Only called once a turn's raster data has actually resolved, so the
+  // target coordinates are guaranteed to exist by the time this fires.
+  const scheduleCameraFlight = (turnId: string) => {
     if (preFlightDelayRef.current) clearTimeout(preFlightDelayRef.current);
     const delay = Math.floor(Math.random() * 240) + 60;
     preFlightDelayRef.current = window.setTimeout(() => {
       preFlightDelayRef.current = null;
-      runCloudFlight(location, turnId);
+      const raster = turnRasterDataRef.current.get(turnId);
+      if (!raster) return;
+      runCloudFlight(raster, turnId);
     }, delay);
   };
 
-  // Drops all pending camera/cloud state and returns to the blank ocean
-  // establishing view — used when starting a brand new chat.
-  const resetMapToOcean = () => {
+  // Fires the Phase 3 raster stub for a turn's first attached image, then
+  // kicks off the cinematic flight once real coordinates are known. If the
+  // stub call fails (e.g. the backend isn't running), the flight still needs
+  // somewhere to go — an image was attached, so this isn't a text-only turn
+  // and the camera shouldn't just sit frozen. A synthetic, file-derived
+  // location (no scripted per-turn city, no generated layer imagery) keeps
+  // the choreography working offline; it upgrades to the real thing the
+  // moment the backend responds to a later turn.
+  const applyRasterData = (sessionId: string, turnId: string, data: ProcessRasterResponse) => {
+    turnRasterDataRef.current.set(turnId, data);
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === sessionId
+          ? { ...s, turns: s.turns.map((t) => (t.id === turnId ? { ...t, raster: data } : t)) }
+          : s
+      )
+    );
+    scheduleCameraFlight(turnId);
+  };
+
+  // Resolves a location for the turn's first image, trying three tiers in
+  // order: the real backend stub (also returns generated layer imagery) ->
+  // real client-side GeoTIFF tag extraction (no imagery, but a genuine
+  // location — works fully offline, including UTM-projected products like
+  // Sentinel-2 L2A) -> a synthetic per-file guess as the last resort.
+  const resolveRasterLocation = async (file: File): Promise<ProcessRasterResponse> => {
+    try {
+      return await rasterOverlay.processRaster(file);
+    } catch {
+      const real = await extractGeoTiffLocation(file);
+      if (real) {
+        return {
+          bbox: real.bbox,
+          center: real.center,
+          zoom: real.zoom,
+          layers: { base: "", structural_changes: "", spectral_bands: "" },
+          source: "geotiff-tags",
+        };
+      }
+      return syntheticRasterFallback(file);
+    }
+  };
+
+  // Hardcoded "highlight the water body" demo: draws a fixed translucent
+  // mask over whatever preview we can get for the image (the backend's
+  // generated base layer, the browser's own preview for PNG/JPEG, or a
+  // client-decoded GeoTIFF preview), and stashes the result for
+  // showRasterForTurn to pick up. If no real preview could be obtained at
+  // all — e.g. a real-world GeoTIFF using a compression codec geotiff.js
+  // can't decode, such as JPEG2000, which is common in genuine Sentinel-2
+  // exports — falls back to a placeholder background sized to the file's
+  // real dimensions instead of skipping the mask entirely, so this
+  // hardcoded demo reliably shows *something* whenever the trigger query
+  // matches, regardless of the uploaded file's real format.
+  const maybeGenerateWaterMask = async (turnId: string, query: string, image: UploadedImage, raster: ProcessRasterResponse) => {
+    if (!isWaterHighlightQuery(query)) return;
+
+    // `image.preview`/the backend URL are owned elsewhere (revoked by
+    // QueryInput.removeImage, or not a blob at all); a client-decoded TIFF
+    // preview is ours alone and only needed transiently to draw the mask.
+    let sourceUrl: string | null = null;
+    let ownedSourceUrl: string | null = null;
+    if (raster.layers.base) {
+      sourceUrl = rasterOverlay.resolveUrl(raster.layers.base);
+    } else if (image.preview) {
+      sourceUrl = image.preview;
+    } else {
+      sourceUrl = ownedSourceUrl = await decodeGeoTiffPreview(image.file);
+    }
+
+    try {
+      let maskUrl: string;
+      if (sourceUrl) {
+        maskUrl = await generateWaterBodyMaskUrl(sourceUrl);
+      } else {
+        const dims = await getGeoTiffDimensions(image.file);
+        maskUrl = await generatePlaceholderMaskUrl(dims?.width ?? 512, dims?.height ?? 512);
+      }
+      const previous = turnWaterMaskRef.current.get(turnId);
+      if (previous) URL.revokeObjectURL(previous);
+      turnWaterMaskRef.current.set(turnId, maskUrl);
+    } catch (e) {
+      console.warn("maybeGenerateWaterMask: failed to generate the hardcoded water-mask overlay", e);
+    } finally {
+      if (ownedSourceUrl) URL.revokeObjectURL(ownedSourceUrl);
+    }
+  };
+
+  const fetchRasterAndFly = async (sessionId: string, turnId: string, images: UploadedImage[], query: string) => {
+    const data = await resolveRasterLocation(images[0].file);
+    await maybeGenerateWaterMask(turnId, query, images[0], data);
+    applyRasterData(sessionId, turnId, data);
+  };
+
+  // Drops all pending camera/cloud state and returns to the open-ocean idle
+  // view — used when starting a brand new chat or switching to an empty one.
+  const resetToOceanView = () => {
     cloudTimeoutsRef.current.forEach((id) => clearTimeout(id));
     cloudTimeoutsRef.current = [];
     if (preFlightDelayRef.current) {
@@ -212,10 +597,16 @@ export default function Home() {
     }
     isTransitioningRef.current = false;
     activeMapTurnIdRef.current = null;
+    framedStageRef.current = null;
     setActiveTurnId(null);
     setRevealedTurnId(null);
     setCloudPhase("idle");
-    camera.flyToSimple(IDLE_VIEW, { showMarker: false });
+    camera.flyToSimple(IDLE_OCEAN_VIEW, { showMarker: false });
+    rasterOverlay.hideRaster();
+    setActiveRaster(null);
+    setHasBaseLayers(false);
+    setWaterMaskAvailable(false);
+    setFocusRect(null);
   };
 
   const handleNewChat = () => {
@@ -224,7 +615,7 @@ export default function Home() {
     setActiveSessionId(session.id);
     setDraftQuery("");
     setDraftImages([]);
-    resetMapToOcean();
+    resetToOceanView();
   };
 
   const handleSelectSession = (id: string) => {
@@ -234,22 +625,26 @@ export default function Home() {
 
     const target = sessions.find((s) => s.id === id);
     if (!target || target.turns.length === 0) {
-      // Fresh/empty chat — always land back on the blank ocean view, never
-      // stuck on whatever coordinates the previous chat left behind.
-      resetMapToOcean();
+      // Fresh/empty chat — always land back on the open-ocean idle view,
+      // never stuck on whatever coordinates the previous chat left behind.
+      resetToOceanView();
       return;
     }
 
-    // Non-empty chat — run the same standardized camera switch used for
-    // submissions/retries; runCloudFlight's own cancelFlight() guarantees
-    // this never fights an in-progress flight from the chat just left.
     if (preFlightDelayRef.current) {
       clearTimeout(preFlightDelayRef.current);
       preFlightDelayRef.current = null;
     }
-    const lastIndex = target.turns.length - 1;
-    const lastTurn = target.turns[lastIndex];
-    runCloudFlight(getTurnLocation(lastIndex), lastTurn.id);
+    const lastTurn = target.turns[target.turns.length - 1];
+    const raster = turnRasterDataRef.current.get(lastTurn.id);
+    if (raster) {
+      // Same standardized camera switch used for submissions/retries —
+      // runCloudFlight's own cancelFlight() guarantees this never fights an
+      // in-progress flight from the chat just left.
+      runCloudFlight(raster, lastTurn.id);
+    } else {
+      settleOnTextOnlyTurn(lastTurn.id);
+    }
   };
 
   const handlePinSession = (id: string) => {
@@ -272,10 +667,7 @@ export default function Home() {
   };
 
   const handleSubmit = () => {
-    if (!draftQuery.trim() || draftImages.length === 0 || loading || !activeSession) return;
-
-    const turnIndex = activeSession.turns.length;
-    const location = getTurnLocation(turnIndex);
+    if (!draftQuery.trim() || loading || !activeSession) return;
 
     const turn: ConversationTurn = {
       id: `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -285,6 +677,7 @@ export default function Home() {
       loading: true,
       error: null,
       createdAt: Date.now(),
+      raster: null,
     };
 
     pendingTurnRef.current = { sessionId: activeSession.id, turnId: turn.id };
@@ -305,10 +698,14 @@ export default function Home() {
     const modalities = draftImages.map((img) => img.modality);
     analyze(files, turn.query, modalities);
 
+    if (draftImages.length > 0) {
+      fetchRasterAndFly(activeSession.id, turn.id, draftImages, turn.query);
+    } else {
+      settleOnTextOnlyTurn(turn.id);
+    }
+
     setDraftQuery("");
     setDraftImages([]);
-
-    scheduleCameraFlight(location, turn.id);
   };
 
   const handleRetry = (turnId: string) => {
@@ -323,7 +720,7 @@ export default function Home() {
           ? {
             ...s,
             turns: s.turns.map((t) =>
-              t.id === turnId ? { ...t, loading: true, result: null, error: null } : t
+              t.id === turnId ? { ...t, loading: true, result: null, error: null, raster: null } : t
             ),
           }
           : s
@@ -337,13 +734,66 @@ export default function Home() {
     analyze(files, turn.query, modalities);
 
     landingElementsRef.current.get(turnId)?.scrollIntoView({ behavior: "smooth", block: "start" });
-    scheduleCameraFlight(getTurnLocation(turnIndex), turnId);
+
+    if (turn.images.length > 0) {
+      fetchRasterAndFly(activeSession.id, turnId, turn.images, turn.query);
+    } else {
+      settleOnTextOnlyTurn(turnId);
+    }
   };
 
   return (
     <div className="relative flex h-full w-full select-none overflow-hidden bg-slate-950">
-      <SatelliteMap initialTarget={IDLE_VIEW} onMapReady={camera.setMap} />
+      <SatelliteMap
+        initialTarget={IDLE_OCEAN_VIEW}
+        onMapReady={(map) => {
+          camera.setMap(map);
+          rasterOverlay.setMap(map);
+          // Keeps focusRect (and everything derived from it — the focus
+          // mask, the wheel-cycle zone, the nav-arrow rail) tracking the
+          // map continuously during ANY camera movement, not just updated
+          // once a flight finishes. Previously that single end-of-flight
+          // update was the only thing moving these elements, which read as
+          // a sudden, disconnected jump rather than a fluid reaction to the
+          // map actually moving — 'move' fires on every rendered frame of
+          // any pan/zoom/flyTo, so this makes them ride along in real time.
+          map.on("move", () => {
+            const turnId = activeMapTurnIdRef.current;
+            if (!turnId) return;
+            const raster = turnRasterDataRef.current.get(turnId);
+            if (!raster) return;
+            setFocusRect(rasterOverlay.getScreenRect(raster.bbox));
+          });
+        }}
+      />
       <CloudTransition phase={cloudPhase} />
+      <FocusMask rect={focusRect} />
+      {focusRect && (hasBaseLayers || waterMaskAvailable) && (
+        // Sits above the scrolling feed (z-10) so hovering the sharp raster
+        // area captures the wheel event for layer-cycling instead of the
+        // page scrolling underneath it.
+        <div
+          className="fixed z-20"
+          style={{
+            left: focusRect.left,
+            top: focusRect.top,
+            width: focusRect.right - focusRect.left,
+            height: focusRect.bottom - focusRect.top,
+          }}
+          onWheel={(e) => cycleActiveLayerFromWheel(e.deltaY)}
+        />
+      )}
+      <PinnedQueryCard
+        turn={activeSession?.turns.find((t) => t.id === activeTurnId) ?? null}
+        rect={focusRect}
+        sidebarWidthPx={sidebarWidthPx}
+        hidden={revealedTurnId !== null && revealedTurnId === activeTurnId}
+      />
+      <ResultInspectorPanel
+        turn={activeSession?.turns.find((t) => t.id === revealedTurnId) ?? null}
+        retryDisabled={loading}
+        onRetry={handleRetry}
+      />
 
       <div className="relative z-30 flex h-full">
         <Sidebar
@@ -371,13 +821,12 @@ export default function Home() {
                 Ready when you are.
               </h1>
               <p className="text-base text-slate-400">
-                Attach satellite imagery and ask a question to begin.
+                Ask a question, optionally with satellite imagery, to begin.
               </p>
             </div>
           )}
 
           {activeSession?.turns.map((turn) => {
-            const revealed = revealedTurnId === turn.id;
             return (
               <Fragment key={turn.id}>
                 {/* Landing section — camera arrives here first; just the prompt. */}
@@ -388,38 +837,21 @@ export default function Home() {
                     if (el) landingElementsRef.current.set(turn.id, el);
                     else landingElementsRef.current.delete(turn.id);
                   }}
-                  className="flex h-full min-h-full snap-start flex-col items-end justify-end gap-3 pb-20"
+                  className="flex h-full min-h-full snap-start flex-col items-center justify-end pb-20"
                 >
-                  <div className="mx-auto flex w-full max-w-3xl justify-end">
-                    <div className="max-w-xl space-y-2 rounded-3xl rounded-tr-sm border border-white/10 bg-slate-800/80 px-3 py-3 text-sm text-slate-100 backdrop-blur-xl">
-                      {turn.images.length > 0 && (
-                        <div className="flex flex-wrap justify-end gap-2">
-                          {turn.images.map((img) => (
-                            <div
-                              key={img.id}
-                              className="h-14 w-14 overflow-hidden rounded-2xl border border-white/15 bg-slate-800/60"
-                            >
-                              {img.preview && (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img
-                                  src={img.preview}
-                                  alt={img.file.name}
-                                  className="h-full w-full object-cover"
-                                />
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <div className="px-1">{turn.query}</div>
-                    </div>
-                  </div>
+                  {/* The query card itself is rendered separately as a
+                      pinned overlay (PinnedQueryCard) — this section stays
+                      as the scroll-snap anchor + landing cue. */}
                   <div className="mx-auto flex w-full max-w-3xl justify-center pt-6">
                     <ChevronDown className="h-5 w-5 animate-bounce text-slate-300/70" />
                   </div>
                 </div>
 
-                {/* Result section — reached only by scrolling further; reveals on arrival. */}
+                {/* Result section — reached only by scrolling further; reveals
+                    ResultInspectorPanel (a floating side panel, rendered once
+                    at the top level) rather than an in-flow card, so the map
+                    stays visible. This section is now just the scroll-snap
+                    anchor + reveal trigger. */}
                 <div
                   data-turn-id={turn.id}
                   data-section="result"
@@ -427,37 +859,42 @@ export default function Home() {
                     if (el) resultElementsRef.current.set(turn.id, el);
                     else resultElementsRef.current.delete(turn.id);
                   }}
-                  className="flex h-full min-h-full snap-start flex-col justify-center gap-4 py-16"
-                >
-                  <div className="mx-auto flex w-full max-w-3xl justify-start pb-24">
-                    <div
-                      className={`w-full max-w-2xl space-y-3 rounded-3xl bg-slate-950/40 p-3 backdrop-blur-xl transition-all duration-700 ease-[cubic-bezier(0.25,0.1,0.25,1)] ${revealed ? "translate-y-0 opacity-100" : "translate-y-10 opacity-0"
-                        }`}
-                    >
-                      <ResultPanel
-                        result={turn.result}
-                        loading={turn.loading}
-                        error={turn.error}
-                      />
-                      <ExecutionTrace trace={turn.result?.execution_trace ?? null} />
-                      {!turn.loading && (
-                        <MessageActions
-                          text={turn.result?.answer ?? null}
-                          onRetry={() => handleRetry(turn.id)}
-                          retryDisabled={loading}
-                        />
-                      )}
-                    </div>
-                  </div>
-                </div>
+                  className="h-full min-h-full snap-start"
+                />
               </Fragment>
             );
           })}
         </main>
       </div>
 
-      {activeSession && activeSession.turns.length > 1 && (canGoUp || canGoDown) && (
-        <div className="fixed right-6 top-1/2 z-30 flex -translate-y-1/2 flex-col gap-2">
+      {activeSession && activeSession.turns.length > 1 && (canGoUp || canGoDown) && (() => {
+        // Docked a fixed, small offset outside the map's own left edge —
+        // equidistant-with-the-sidebar looked right only by coincidence in
+        // the "result" stage (where the map sits close to the sidebar
+        // anyway); in the "landing" stage the map is framed more centered,
+        // so that same math left the arrow floating far from the map,
+        // reading as disconnected from it. Hugging the map directly reads
+        // right in both stages. Vertically centered on the map's own rect
+        // (not the screen).
+        //
+        // No CSS transition here on purpose — `focusRect` now updates on
+        // every 'move' event during a flight (see onMapReady above), so
+        // this position already moves in many small real steps in sync
+        // with the map itself. Adding a transition on top would make each
+        // of those per-frame updates kick off its own brief animation,
+        // which queues up faster than they can finish and reads as a
+        // laggy, rubber-banding chase instead of the map's own smooth
+        // motion. Falls back to a fixed position near the panel when
+        // there's no map at all (e.g. a text-only turn).
+        const GAP = 8;
+        const style: React.CSSProperties = focusRect
+          ? { left: focusRect.left - GAP, top: (focusRect.top + focusRect.bottom) / 2, transform: "translate(-100%, -50%)" }
+          : { right: PANEL_SIDE_MARGIN + PANEL_WIDTH + 16, top: "50%", transform: "translateY(-50%)" };
+        return (
+        <div
+          className="fixed z-30 flex flex-col gap-2"
+          style={style}
+        >
           {canGoUp && (
             <button
               type="button"
@@ -481,7 +918,8 @@ export default function Home() {
             </button>
           )}
         </div>
-      )}
+        );
+      })()}
 
       <LibraryDrawer open={libraryOpen} onClose={() => setLibraryOpen(false)} sessions={sessions} />
 
@@ -493,6 +931,11 @@ export default function Home() {
         onSubmit={handleSubmit}
         loading={loading}
         sidebarWidth={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH}
+        layerSwitcherVisible={hasBaseLayers || waterMaskAvailable}
+        activeLayer={activeLayerKey}
+        hasBaseLayers={hasBaseLayers}
+        waterMaskAvailable={waterMaskAvailable}
+        onActiveLayerChange={handleActiveLayerChange}
       />
     </div>
   );

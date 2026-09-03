@@ -68,6 +68,29 @@ export interface UploadedImage {
     modality: Modality;
 }
 
+export interface RasterBBox {
+    north: number;
+    south: number;
+    east: number;
+    west: number;
+}
+
+export interface RasterLayers {
+    base: string;
+    structural_changes: string;
+    spectral_bands: string;
+}
+
+export type LayerKey = keyof RasterLayers;
+
+export interface ProcessRasterResponse {
+    bbox: RasterBBox;
+    center: [number, number];
+    zoom: number;
+    layers: RasterLayers;
+    source: "geotiff-tags" | "synthetic";
+}
+
 /** One user→assistant exchange in the conversational feed. */
 export interface ConversationTurn {
     id: string;
@@ -77,6 +100,7 @@ export interface ConversationTurn {
     loading: boolean;
     error: string | null;
     createdAt: number;
+    raster: ProcessRasterResponse | null;
 }
 
 /** A single chat session in the sidebar history. */
