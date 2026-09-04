@@ -9,6 +9,7 @@ to fail a request.
 
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -173,6 +174,27 @@ def test_result_is_always_json_serializable():
         "nested": {"bytes": b"abc", "path": Path("/tmp")},
     }
     result = sanitize_payload(payload)
+    json.dumps(result["value"], allow_nan=False)
+
+
+def test_wide_dag_is_bounded_by_the_node_budget():
+    """A DAG, not a cycle: `x = [x] * 25` repeated builds ~7 objects that the
+    item/depth caps alone would expand to 25**6 ≈ 244M nodes, because sibling
+    branches each legitimately re-expand the shared child. The size cap can't
+    prevent that — it only runs after the whole tree is built. Sanitizing
+    happens inside the request handler, so an unbounded walk stalls the event
+    loop; this must terminate quickly."""
+    x = [1] * 25
+    for _ in range(6):
+        x = [x] * 25
+
+    started = time.perf_counter()
+    result = sanitize_payload(x)
+    elapsed = time.perf_counter() - started
+
+    # Generous bound — the point is "fast", not a precise budget.
+    assert elapsed < 5.0, f"sanitize took {elapsed:.1f}s on a ~200-byte DAG"
+    assert "value" in result
     json.dumps(result["value"], allow_nan=False)
 
 

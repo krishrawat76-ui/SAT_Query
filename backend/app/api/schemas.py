@@ -90,9 +90,10 @@ class SelectedModel(BaseModel):
     # The pipeline actions this model was actually assigned, in step order.
     actions: list[str] = []
     steps: list[int] = []
-    # Registry facts, read at trace time — not invented.
-    registered: bool = True
-    loaded: bool = False
+    # Registry facts, read at trace time — not invented. None when no registry
+    # was available to ask, rather than an optimistic default.
+    registered: Optional[bool] = None
+    loaded: Optional[bool] = None
     vram_gb: Optional[float] = None
     # No wrapper exposes a version string today (the registry stores only a
     # loader and a VRAM estimate). Previously hardcoded "1.0"; now honestly

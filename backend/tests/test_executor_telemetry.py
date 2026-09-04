@@ -77,14 +77,26 @@ def test_failure_during_inference_is_distinguishable(fake_model_factory, fake_re
 
 
 def test_failure_during_load_reports_no_inference_time(fake_model_factory, fake_registry_factory):
-    registry = fake_registry_factory({"m": fake_model_factory()}, load_raises=RuntimeError("load boom"))
+    """The point of the split on the error path: a step that died while
+    loading must still report the load time it burned, so it's
+    distinguishable from one that died instantly. Without `load_delay` the
+    assertion below is vacuous — `inference_time_ms` is initialized to 0.0
+    before the raise, so it would pass even if nothing were measured."""
+    registry = fake_registry_factory(
+        {"m": fake_model_factory()},
+        load_delay=LOAD_DELAY,
+        load_raises=RuntimeError("load boom"),
+    )
 
     results = PipelineExecutor(registry).execute(_pipeline("m"), [], "q")
 
     step = results[0]
     assert step.success is False
     assert "load boom" in step.error
+    assert step.load_time_ms >= DELAY_MS_FLOOR
     assert step.inference_time_ms == 0.0
+    # The error path must keep the same invariant as the success path.
+    assert step.time_ms == step.load_time_ms + step.inference_time_ms
 
 
 def test_pipeline_stops_after_a_failure(fake_model_factory, fake_registry_factory):

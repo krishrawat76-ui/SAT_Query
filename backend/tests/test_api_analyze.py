@@ -42,6 +42,63 @@ def test_response_is_strictly_valid_json(client, tiny_png):
     json.loads(res.text, parse_constant=_reject_constant)
 
 
+def test_non_finite_values_never_reach_the_client(client, tiny_png, monkeypatch):
+    """The previous version of this guard never set ?debug=true, so every
+    payload_snapshot was None and the parse hook had nothing to inspect —
+    deleting sanitize.py's NaN handling left it passing. This drives a model
+    that actually returns NaN, through both the snapshot and the confidence
+    aggregation."""
+    registry = client.app.state.model_registry
+    real_get = registry.get
+
+    class NaNModel:
+        last_telemetry = None
+
+        def run(self, action, context):
+            return {
+                "answer": "nan test",
+                "confidence": float("nan"),
+                "ratio": float("inf"),
+            }
+
+    monkeypatch.setattr(registry, "get", lambda name: NaNModel())
+    try:
+        res = _post(client, tiny_png, params={"debug": "true"})
+    finally:
+        monkeypatch.setattr(registry, "get", real_get)
+
+    assert res.status_code == 200, res.text
+    # Raises if a bare NaN/Infinity literal made it into the body.
+    body = json.loads(res.text, parse_constant=_reject_constant)
+
+    assert body["confidence"] is None, "non-finite confidence must not be averaged in"
+    snapshot = body["execution_trace"]["pipeline_steps"][0]["payload_snapshot"]
+    assert snapshot["confidence"] is None
+    assert snapshot["ratio"] is None
+
+
+def test_non_dict_model_output_degrades_instead_of_500(client, tiny_png, monkeypatch):
+    """The integrator runs outside the executor's try/except, so a wrapper
+    returning a str used to raise TypeError and 500 the whole request."""
+    registry = client.app.state.model_registry
+    real_get = registry.get
+
+    class StringModel:
+        last_telemetry = None
+
+        def run(self, action, context):
+            return "answer: not a dict"
+
+    monkeypatch.setattr(registry, "get", lambda name: StringModel())
+    try:
+        res = _post(client, tiny_png)
+    finally:
+        monkeypatch.setattr(registry, "get", real_get)
+
+    assert res.status_code == 200, res.text
+    AnalysisResponse.model_validate(res.json())
+
+
 def _reject_constant(name):
     raise AssertionError(f"non-finite constant {name!r} leaked into the response")
 
@@ -74,7 +131,13 @@ def test_no_fabricated_model_version_over_the_wire(client, tiny_png):
         assert model["selection_reason"]
 
 
-def test_snapshots_are_off_by_default(client, tiny_png):
+def test_snapshots_are_off_by_default(client, tiny_png, monkeypatch):
+    # Pinned rather than inherited: the default comes from settings.DEBUG_TRACE,
+    # so a developer or CI job with SATQUERY_DEBUG=1 exported would otherwise
+    # see a spurious failure here.
+    from app.utils.config import settings
+
+    monkeypatch.setattr(settings, "DEBUG_TRACE", False)
     res = _post(client, tiny_png)
     trace = res.json()["execution_trace"]
 
@@ -90,6 +153,19 @@ def test_debug_param_enables_snapshots(client, tiny_png):
 
     assert trace["debug"] is True
     assert any(s["payload_snapshot"] is not None for s in trace["pipeline_steps"])
+
+
+def test_debug_param_can_override_an_enabled_default(client, tiny_png, monkeypatch):
+    """Only the None→setting and true→on directions were covered; an explicit
+    ?debug=false must still win over a server default of True."""
+    from app.utils.config import settings
+
+    monkeypatch.setattr(settings, "DEBUG_TRACE", True)
+    res = _post(client, tiny_png, params={"debug": "false"})
+    trace = res.json()["execution_trace"]
+
+    assert trace["debug"] is False
+    assert all(s["payload_snapshot"] is None for s in trace["pipeline_steps"])
 
 
 def test_timings_are_populated_and_consistent(client, tiny_png):

@@ -121,6 +121,13 @@ class InputValidator:
                     )
 
                 format_info.append({
+                    # Index into the ORIGINAL image_paths list. Entries are
+                    # skipped for images that fail a check above, so a
+                    # positional zip against `modalities`/`dates` downstream
+                    # would silently attach the wrong image's metadata once
+                    # any image is skipped. Carrying the source index keeps
+                    # that correlation correct.
+                    "index": i,
                     "filename": p.name,
                     "size": [width, height],
                     "bands": bands,

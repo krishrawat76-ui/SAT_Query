@@ -4,6 +4,7 @@ API Routes — POST /api/analyze and GET /api/health.
 Wires together: Validator → Router → Executor → Integrator → TraceBuilder.
 """
 
+import shutil
 import time
 import uuid
 import tempfile
@@ -47,20 +48,76 @@ async def analyze(
     debug = settings.DEBUG_TRACE if debug is None else debug
     logger.info(f"[{request_id}] New request — Query: '{query}' | Images: {len(images)}")
 
+    # Every temp dir created below is removed in the `finally` at the end of
+    # this handler — previously each request leaked its upload directory for
+    # the process lifetime, including on the 422 path.
+    tmp_dirs: list[Path] = []
+    try:
+        return await _run_analysis(
+            request=request,
+            images=images,
+            query=query,
+            modalities=modalities,
+            dates=dates,
+            debug=debug,
+            request_id=request_id,
+            request_t0=request_t0,
+            tmp_dirs=tmp_dirs,
+        )
+    finally:
+        for d in tmp_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+async def _run_analysis(
+    *,
+    request: Request,
+    images: list[UploadFile],
+    query: str,
+    modalities: str,
+    dates: Optional[str],
+    debug: bool,
+    request_id: str,
+    request_t0: float,
+    tmp_dirs: list[Path],
+):
+    """Body of POST /api/analyze, split out so the route can guarantee temp
+    directory cleanup in a `finally` regardless of how this returns or raises."""
     # ── 1. Save uploaded images to temp directory ──
     # Each image gets its own temp dir, so the original filename is kept
     # (rather than a generic "image_N.ext") — it's echoed back in synthesized
     # stub answers, and Path(...).name strips any path components for safety.
     upload_start = time.perf_counter()
+    max_upload_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
     image_paths = []
     for i, img_file in enumerate(images):
         original_name = Path(img_file.filename or "").name or f"image_{i}.png"
         tmp_dir = Path(tempfile.mkdtemp(prefix="satquery_"))
+        tmp_dirs.append(tmp_dir)
         tmp_path = tmp_dir / original_name
-        content = await img_file.read()
-        tmp_path.write_bytes(content)
+        # Streamed with a running cap rather than `await img_file.read()`:
+        # that buffered the entire upload in memory and wrote it to disk
+        # before any size check ran, so a multi-GB POST was fully absorbed
+        # before being rejected. MAX_UPLOAD_SIZE_MB was defined but never
+        # enforced anywhere.
+        written = 0
+        with tmp_path.open("wb") as fh:
+            while chunk := await img_file.read(1024 * 1024):
+                written += len(chunk)
+                if written > max_upload_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail={"errors": [
+                            f"Image {i + 1}: exceeds the "
+                            f"{settings.MAX_UPLOAD_SIZE_MB} MB upload limit."
+                        ]},
+                    )
+                fh.write(chunk)
         image_paths.append(str(tmp_path))
         logger.debug(f"[{request_id}] Saved image {i}: {tmp_path}")
+    # Note: this measures the spool→disk copy only. FastAPI has already
+    # received and parsed the multipart body by the time this handler runs,
+    # so network receive time is not included here or in total_time_ms.
     upload_ms = (time.perf_counter() - upload_start) * 1000
 
     # ── 2. Parse metadata ──
@@ -185,6 +242,12 @@ async def health(request: Request):
             gpu_mem = f"{used:.1f} / {total:.1f} GB"
     except ImportError:
         pass
+    except Exception as e:
+        # A sick GPU must not make the health endpoint 500 — an orchestrator
+        # reads that as "kill the pod" instead of "drain it". Report what we
+        # know and leave the memory figure null.
+        logger.warning(f"GPU status unavailable: {e}")
+        gpu_mem = None
 
     return {
         "status": "healthy",

@@ -24,6 +24,32 @@ from app.agent.executor import StepResult
 from app.output.sanitize import sanitize_payload
 
 
+# Every key `ModelTelemetry` (schemas.py) and the TS mirror declare. A wrapper
+# sets `last_telemetry` freely, so without normalizing here a partial dict
+# would ship keys the frontend type promises are always present — the one
+# place the TS contract could actually lie about shape rather than value.
+_TELEMETRY_KEYS = (
+    "prompt_tokens",
+    "completion_tokens",
+    "generation_time_ms",
+    "tokens_per_sec",
+    "max_new_tokens",
+    "device",
+)
+
+
+def _telemetry(raw: Optional[dict]) -> Optional[dict]:
+    """Normalize a wrapper-supplied telemetry dict to the declared shape.
+
+    Missing keys become None (absent means unmeasured, which is null, not a
+    missing field). Unknown keys are dropped rather than passed through, so a
+    wrapper cannot silently extend the wire contract.
+    """
+    if not raw:
+        return None
+    return {key: raw.get(key) for key in _TELEMETRY_KEYS}
+
+
 def _selection_reason(model_name: str, decision: RoutingDecision) -> str:
     """Compose a selection reason purely from data the router produced.
 
@@ -88,18 +114,33 @@ class TraceBuilder:
         stage_ms = stage_ms or {}
         metadata = metadata or {}
 
-        pipeline_steps_ms = round(sum(r.time_ms for r in step_results), 1)
-        # Real handler wall clock when the route provided a start marker;
-        # otherwise fall back to the step sum so this stays usable standalone.
-        if request_t0 is not None:
-            total_time_ms = round((time.perf_counter() - request_t0) * 1000, 1)
-        else:
-            total_time_ms = pipeline_steps_ms
+        # Microsecond resolution. perf_counter measures far finer than 0.1ms,
+        # and stub models routinely complete in tens of microseconds — rounding
+        # to 1 decimal collapsed all of them to a flat 0.0 and made the debug
+        # timeline useless for exactly the steps it was meant to explain.
+        pipeline_steps_ms = round(sum(r.time_ms for r in step_results), 3)
 
         measured = sum(
             stage_ms.get(k, 0.0)
             for k in ("upload_ms", "validation_ms", "routing_ms", "execution_ms", "integration_ms")
         )
+
+        # Built before the total is taken, deliberately: under ?debug=true the
+        # per-step payload sanitizing here is the most expensive non-inference
+        # work in the request. Computing total_time_ms at the top of this
+        # method (as it used to be) excluded that cost entirely, so `other_ms`
+        # could never account for trace building even though the schema says
+        # it does.
+        pipeline_steps = [self._step(r, debug=debug) for r in step_results]
+        selected_models = self._selected_models(decision, registry)
+        input_composition = self._input_composition(validation, metadata)
+
+        # Real handler wall clock when the route provided a start marker;
+        # otherwise fall back to the step sum so this stays usable standalone.
+        if request_t0 is not None:
+            total_time_ms = round((time.perf_counter() - request_t0) * 1000, 3)
+        else:
+            total_time_ms = pipeline_steps_ms
 
         return {
             "request_id": request_id,
@@ -115,7 +156,7 @@ class TraceBuilder:
                 "compatible": validation.is_valid,
                 "warnings": validation.warnings,
             },
-            "input_composition": self._input_composition(validation, metadata),
+            "input_composition": input_composition,
             "detected_task": decision.task_type.value,
             # RuleBasedRouter is deterministic keyword matching, not a
             # learned model — it has no real confidence score to report.
@@ -140,21 +181,20 @@ class TraceBuilder:
                 "intent_decomposition": None,
                 "planner_raw_output": None,
             },
-            "selected_models": self._selected_models(decision, registry),
-            "pipeline_steps": [
-                self._step(r, debug=debug) for r in step_results
-            ],
+            "selected_models": selected_models,
+            "pipeline_steps": pipeline_steps,
             "timings": {
-                "upload_ms": round(stage_ms.get("upload_ms", 0.0), 1),
-                "validation_ms": round(stage_ms.get("validation_ms", 0.0), 1),
-                "routing_ms": round(stage_ms.get("routing_ms", 0.0), 1),
-                "execution_ms": round(stage_ms.get("execution_ms", 0.0), 1),
-                "integration_ms": round(stage_ms.get("integration_ms", 0.0), 1),
+                # 3 decimals throughout — see the pipeline_steps_ms note above.
+                "upload_ms": round(stage_ms.get("upload_ms", 0.0), 3),
+                "validation_ms": round(stage_ms.get("validation_ms", 0.0), 3),
+                "routing_ms": round(stage_ms.get("routing_ms", 0.0), 3),
+                "execution_ms": round(stage_ms.get("execution_ms", 0.0), 3),
+                "integration_ms": round(stage_ms.get("integration_ms", 0.0), 3),
                 "pipeline_steps_ms": pipeline_steps_ms,
                 # Clamped: stages are measured sequentially and cannot
                 # legitimately exceed the total, but float noise shouldn't
                 # surface as -0.0001.
-                "other_ms": round(max(0.0, total_time_ms - measured), 1),
+                "other_ms": round(max(0.0, total_time_ms - measured), 3),
             },
             "total_time_ms": total_time_ms,
         }
@@ -168,13 +208,18 @@ class TraceBuilder:
         models = []
         for name in decision.models:
             steps = [s for s in decision.pipeline if s.get("model") == name]
+            # With no registry there is nothing to observe, so every field
+            # stays None rather than defaulting to an optimistic
+            # "registered: true, loaded: false" — asserting a model IS
+            # registered without checking is the same fabrication this whole
+            # trace exists to avoid.
             info = registry.describe(name) if registry is not None else {}
             models.append({
                 "name": name,
                 "actions": [s["action"] for s in steps],
                 "steps": [s["step"] for s in steps],
-                "registered": info.get("registered", True),
-                "loaded": info.get("loaded", False),
+                "registered": info.get("registered"),
+                "loaded": info.get("loaded"),
                 "vram_gb": info.get("vram_gb"),
                 "version": info.get("version"),
                 "selection_reason": _selection_reason(name, decision),
@@ -195,13 +240,15 @@ class TraceBuilder:
             "model": r.model_name,
             "action": r.action,
             "status": "success" if r.success else "error",
-            "time_ms": round(r.time_ms, 1),
+            # 3 decimals: sub-millisecond steps are the norm for stub models,
+            # and rounding to 0.1ms reported all of them as a flat 0.0.
+            "time_ms": round(r.time_ms, 3),
             "error": r.error,
-            "load_time_ms": round(r.load_time_ms, 1),
-            "inference_time_ms": round(r.inference_time_ms, 1),
+            "load_time_ms": round(r.load_time_ms, 3),
+            "inference_time_ms": round(r.inference_time_ms, 3),
             "model_was_cached": r.model_was_cached,
-            "started_at_ms": round(r.started_at_ms, 1),
-            "telemetry": r.telemetry,
+            "started_at_ms": round(r.started_at_ms, 3),
+            "telemetry": _telemetry(r.telemetry),
             "payload_snapshot": snapshot,
             "payload_bytes": payload_bytes,
             # The executor is a strictly linear loop; synthesizing [n-1]
@@ -216,7 +263,13 @@ class TraceBuilder:
         total_pixels = 0
         total_size_mb = 0.0
 
-        for i, f in enumerate(validation.format_info):
+        for position, f in enumerate(validation.format_info):
+            # Index into the original upload list, not into format_info —
+            # entries are skipped for images that failed a per-image check, so
+            # a positional zip would label a surviving image with a skipped
+            # one's modality/date. Falls back to position for callers whose
+            # format_info predates the index field.
+            i = f.get("index", position)
             size = f.get("size") or [0, 0]
             width, height = (int(size[0]), int(size[1])) if len(size) >= 2 else (0, 0)
             total_pixels += width * height
@@ -230,8 +283,6 @@ class TraceBuilder:
                 "bands": int(f.get("bands", 0) or 0),
                 "format": f.get("format", "unknown"),
                 "file_size_mb": round(file_size_mb, 3),
-                # Positional zip, length-guarded: format_info can be shorter
-                # than modalities if an image failed a per-image check.
                 "modality": (
                     validation.modalities[i] if i < len(validation.modalities) else None
                 ),

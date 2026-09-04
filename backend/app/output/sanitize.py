@@ -23,6 +23,14 @@ MAX_STRING = 512
 MAX_ITEMS = 25
 MAX_DEPTH = 6
 MAX_TOTAL_BYTES = 32_768
+# Hard ceiling on how many values the walk will visit, checked DURING
+# traversal. The size cap above bounds the output but not the work: the item
+# and depth caps still permit 25**6 ≈ 244M nodes, and a ~200-byte DAG
+# (`x = [x] * 25` repeated) hits that, because sibling branches legitimately
+# re-expand a shared child. Sanitizing runs synchronously inside the request
+# handler, so an unbounded walk stalls the whole event loop. ~20k nodes is far
+# more than any readable snapshot needs.
+MAX_NODES = 20_000
 # Above this element count, computing min/max/mean over an array costs more
 # than the debug value it provides.
 ARRAY_STATS_MAX_SIZE = 4_000_000
@@ -73,7 +81,13 @@ def _is_pil_image(obj: Any) -> bool:
     return hasattr(obj, "size") and hasattr(obj, "mode") and hasattr(obj, "getbands")
 
 
-def _sanitize(obj: Any, depth: int, seen: set) -> Any:
+def _sanitize(obj: Any, depth: int, seen: set, budget: list) -> Any:
+    # Decremented on every visited value, not just containers, so the walk is
+    # bounded by total work rather than by shape. See MAX_NODES.
+    budget[0] -= 1
+    if budget[0] < 0:
+        return {"__truncated__": "node budget exhausted"}
+
     if obj is None or isinstance(obj, (bool, int)):
         return obj
 
@@ -122,7 +136,7 @@ def _sanitize(obj: Any, depth: int, seen: set) -> Any:
             if i >= MAX_ITEMS:
                 out["__truncated__"] = len(obj) - MAX_ITEMS
                 break
-            out[str(key)] = _sanitize(value, depth + 1, seen)
+            out[str(key)] = _sanitize(value, depth + 1, seen, budget)
         return out
 
     if isinstance(obj, (list, tuple, set, frozenset)):
@@ -130,7 +144,7 @@ def _sanitize(obj: Any, depth: int, seen: set) -> Any:
             return [{"__cycle__": True}]
         seen = seen | {id(obj)}
         items = list(obj)
-        out_list = [_sanitize(v, depth + 1, seen) for v in items[:MAX_ITEMS]]
+        out_list = [_sanitize(v, depth + 1, seen, budget) for v in items[:MAX_ITEMS]]
         if len(items) > MAX_ITEMS:
             out_list.append({"__truncated__": len(items) - MAX_ITEMS})
         return out_list
@@ -148,7 +162,7 @@ def sanitize_payload(obj: Any, *, max_total_bytes: int = MAX_TOTAL_BYTES) -> dic
     Never raises: a debug feature must not be able to fail a request.
     """
     try:
-        safe = _sanitize(obj, depth=0, seen=set())
+        safe = _sanitize(obj, depth=0, seen=set(), budget=[MAX_NODES])
         encoded = json.dumps(safe, default=str, allow_nan=False)
         size = len(encoded)
 
@@ -166,4 +180,6 @@ def sanitize_payload(obj: Any, *, max_total_bytes: int = MAX_TOTAL_BYTES) -> dic
 
         return {"value": safe, "bytes": size}
     except Exception as e:
-        return {"value": {"__sanitizer_error__": str(e)}, "bytes": 0}
+        # `bytes: None`, not 0 — 0 would assert "this payload was empty",
+        # which is a measurement we did not make. Unknown is null.
+        return {"value": {"__sanitizer_error__": str(e)}, "bytes": None}

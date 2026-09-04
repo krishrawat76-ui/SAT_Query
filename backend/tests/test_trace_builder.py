@@ -227,3 +227,66 @@ def test_trace_validates_against_the_pydantic_schema(validation, decision, step_
     trace = _build(validation, decision, step_results, registry, debug=True,
                    request_id="abc123", request_t0=time.perf_counter())
     ExecutionTrace.model_validate(trace)
+
+
+def test_schema_validates_the_risky_shapes(validation, decision, registry):
+    """The happy-path fixture has telemetry=None, error=None, success=True and
+    no snapshots — so the three shapes most likely to drift were never
+    validated. This covers all of them at once."""
+    from app.api.schemas import ExecutionTrace
+
+    steps = [
+        # Populated telemetry, deliberately PARTIAL — a wrapper sets
+        # last_telemetry freely, and the frontend type declares all six keys
+        # as always-present.
+        StepResult(1, "rs_vlm", "answer_question", {"answer": "x"},
+                   time_ms=12.0, success=True, load_time_ms=1.0,
+                   inference_time_ms=11.0, model_was_cached=True,
+                   telemetry={"prompt_tokens": 100, "completion_tokens": 20}),
+        # A failed step, which never went through model_validate before.
+        StepResult(2, "sam", "segment_regions", None, time_ms=3.0,
+                   success=False, error="boom", load_time_ms=3.0,
+                   inference_time_ms=0.0, model_was_cached=False,
+                   started_at_ms=12.0),
+    ]
+
+    trace = _build(validation, decision, steps, registry, debug=True)
+    ExecutionTrace.model_validate(trace)
+
+    telemetry = trace["pipeline_steps"][0]["telemetry"]
+    # Normalized to the full declared shape: absent counters are explicitly
+    # null, not missing keys the TS type promised would be there.
+    assert set(telemetry) == {
+        "prompt_tokens", "completion_tokens", "generation_time_ms",
+        "tokens_per_sec", "max_new_tokens", "device",
+    }
+    assert telemetry["prompt_tokens"] == 100
+    assert telemetry["device"] is None
+
+    failed = trace["pipeline_steps"][1]
+    assert failed["status"] == "error"
+    assert failed["error"] == "boom"
+
+
+def test_no_registry_reports_unknown_rather_than_registered(validation, decision, step_results):
+    """Without a registry there is nothing to observe, so registered/loaded
+    must be null — not an optimistic 'registered: true'."""
+    trace = TraceBuilder().build(validation, decision, step_results)
+
+    for model in trace["selected_models"]:
+        assert model["registered"] is None
+        assert model["loaded"] is None
+        assert model["vram_gb"] is None
+
+
+def test_sub_millisecond_timings_survive_rounding(validation, decision, registry):
+    """Stub models finish in tens of microseconds; rounding to 0.1ms reported
+    every one of them as a flat 0.0 and made the timeline useless."""
+    steps = [StepResult(1, "rs_vlm", "answer_question", {"answer": "x"},
+                        time_ms=0.042, success=True, load_time_ms=0.0,
+                        inference_time_ms=0.042, model_was_cached=True)]
+
+    trace = _build(validation, decision, steps, registry)
+
+    assert trace["pipeline_steps"][0]["time_ms"] == 0.042
+    assert trace["timings"]["pipeline_steps_ms"] == 0.042

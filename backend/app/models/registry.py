@@ -108,10 +108,18 @@ class ModelRegistry:
                 free = torch.cuda.mem_get_info()[0] / 1e9
 
         except ImportError:
-            # No torch — skip VRAM management (CPU mode). Deliberately narrow:
-            # any other failure here should stay loud rather than silently
-            # disabling VRAM management.
+            # No torch — CPU mode, nothing to manage.
             pass
+        except Exception as e:
+            # A CUDA query can fail for reasons that have nothing to do with
+            # this model: a poisoned context, a post-fork process, a driver
+            # mismatch. Previously only ImportError was caught, so such a
+            # RuntimeError escaped _ensure_vram → escaped _load → and every
+            # subsequent load failed for the process lifetime with a raw CUDA
+            # string. Degrade to "skip VRAM management" and let the load
+            # attempt proceed; if there genuinely isn't room, the loader's own
+            # OOM is the accurate error.
+            logger.warning(f"VRAM check failed ({e}); proceeding without eviction.")
 
     def unload(self, name: str):
         """Unload a model and free its resources."""

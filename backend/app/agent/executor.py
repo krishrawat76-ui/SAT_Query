@@ -113,8 +113,15 @@ class PipelineExecutor:
             infer_ms = 0.0
             try:
                 load_start = time.perf_counter()
-                model = self.registry.get(model_name)
-                load_ms = (time.perf_counter() - load_start) * 1000
+                try:
+                    model = self.registry.get(model_name)
+                finally:
+                    # In a `finally` so a load that RAISES still records the
+                    # time it burned. Assigning only on the success path meant
+                    # a failed 30s model load reported load_time_ms: 0.0 —
+                    # indistinguishable from an instant failure, despite the
+                    # comment below promising exactly that distinction.
+                    load_ms = (time.perf_counter() - load_start) * 1000
 
                 # Clear any telemetry left from a previous run before calling
                 # this one, so a wrapper that fails to report can't silently
