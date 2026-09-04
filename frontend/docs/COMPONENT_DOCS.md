@@ -160,6 +160,15 @@ list (query, thumbnails, detected task, confidence, timestamp) — no
 separate storage, just a view over the same session state `page.tsx`
 already holds.
 
+Animated via `AnimatePresence`: backdrop fades in/out (`duration: 0.2`),
+panel slides from the right (`x: "100%" → 0`, spring `stiffness: 300,
+damping: 30` — matching `ResultInspectorPanel`'s turn-card timing). Surface
+styling (`bg-slate-900/40 backdrop-blur-xl border-white/10 text-slate-200`)
+deliberately mirrors `Sidebar.tsx`'s `<aside>` via a shared `PANEL_SURFACE`
+constant, so the two docked glass panels read as one visual family. See
+`CHANGELOG.md`'s Library section for why this replaced an unanimated
+`if (!open) return null`.
+
 ### `QueryInput`
 
 ```ts
@@ -445,11 +454,17 @@ interface ResultInspectorPanelProps {
 Fixed-width (440px) floating right-side panel, vertically centered between
 `PANEL_TOP_MARGIN` (40px) and `PANEL_BOTTOM_CLEARANCE` (200px, clears the
 layer-switcher/chat-input cluster). Holds the query header + `ResultPanel` +
-`ExecutionTrace` + `MessageActions` as one internally-scrollable stack
-(plain `overflow-y-auto`, deliberately no scroll-edge fade mask — see
-`CHANGELOG.md`'s rendering-bug-fixes section for why). Replaces Phase 2's
-in-flow result card entirely; the map/raster/focus-mask remain visible on
-the left at all times.
+`ExecutionTrace` + (when Debug Mode is on) `DebugPanel` + `MessageActions` as
+one internally-scrollable stack (`overflow-y-auto`, with a top/bottom
+progressive-blur fade — two standalone sibling `div`s with their own
+`mask-image`, not a mask on the scroll container itself, each shown only
+when `scrollTop`/`scrollHeight`/`clientHeight` (tracked via a `scroll`
+listener + `ResizeObserver`, the latter needed since expanding an
+accordion changes `scrollHeight` with no `scroll` event) says there's
+real content behind that edge — see
+`CHANGELOG.md`'s rendering-bug-fixes section for why it has to be built that
+way). Replaces Phase 2's in-flow result card entirely; the map/raster/focus-
+mask remain visible on the left at all times.
 
 ### `RadiantCard`
 

@@ -172,6 +172,23 @@ query text, attached thumbnails, detected-task badge, confidence, and
 timestamp — read directly from existing in-memory session state (no
 separate persistence layer).
 
+**Phase 4 follow-up — animated entrance + shared surface with `Sidebar`.**
+Originally an instant `if (!open) return null` mount/unmount with no
+transition at all. Now wrapped in `AnimatePresence`: the backdrop fades
+(`opacity`, `duration: 0.2`) and the panel itself slides in from the right
+(`x: "100%" → 0`, `exit: "100%"`) using the same spring already established
+for panel-sized elements in this codebase — `stiffness: 300, damping: 30`,
+the same values `ResultInspectorPanel`'s turn card uses — rather than the
+snappier 400+/32 springs reserved for small popovers (`QueryInput`,
+`LayerSwitcher`). An intermediate version briefly slid the panel in from
+the left instead (matching the "Library" trigger's position in the
+left-docked `Sidebar`); reverted back to the right per explicit direction.
+The panel's surface classes (`bg-slate-900/40 backdrop-blur-xl
+border-white/10 text-slate-200`) now exactly mirror `Sidebar.tsx`'s own
+`<aside>`, pulled into a shared `PANEL_SURFACE` constant — confirmed via
+computed styles in Playwright that the rendered background color and blur
+radius are pixel-identical between the two.
+
 ## Message actions (`src/components/MessageActions.tsx`)
 
 Rendered under each answer card: **Copy** (writes the answer to the
@@ -386,6 +403,25 @@ course of this phase:
   cause of a reported "transparency looks inconsistent after scrolling"
   bug; fixed by removing `ResultInspectorPanel`'s scroll-edge fade masking
   mechanism entirely in favor of a plain hard-clip `overflow-y-auto`.
+  **(Phase 4 follow-up: reintroduced safely.)** The hard clip itself then
+  read as a regression ("progressive blur doesn't work"). Re-added the fade
+  using the pattern this codebase already uses safely elsewhere
+  (`RadiantCard`, `QueryInput`'s popover halo): `mask-image` applied to a
+  small standalone sibling `div` with no card children of its own, laid
+  over the top/bottom edges of the scroll container instead of wrapping it.
+  Verified via Playwright with a genuinely overflowing debug panel — the
+  edges now blur, and the cards underneath stay translucent.
+  A first pass rendered both fade layers unconditionally, which permanently
+  softened the query pill's top edge and the retry-icon row's bottom edge
+  even when the stack fit with nothing behind either edge to hide. Fixed by
+  tracking real scroll position (`scrollTop`/`scrollHeight`/`clientHeight`
+  via a `scroll` listener, plus a `ResizeObserver` on the scroll container
+  since expanding an accordion inside it — `ExecutionTrace`, `DebugPanel` —
+  changes `scrollHeight` without firing a `scroll` event) so each edge's
+  fade only renders once there's genuinely more content past it. Verified
+  by scrubbing a Playwright-driven scroller to both extremes and the
+  midpoint: 0 fade layers when the content fits, exactly 1 at each scroll
+  extreme, 2 in the middle.
 
 ## Query input & suggestion popover polish
 
