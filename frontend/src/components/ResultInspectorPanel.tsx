@@ -1,8 +1,10 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import ResultPanel from "./ResultPanel";
 import ExecutionTrace from "./ExecutionTrace";
+import DebugPanel from "./DebugPanel";
 import MessageActions from "./MessageActions";
 import type { ConversationTurn } from "@/types/api";
 
@@ -11,6 +13,9 @@ interface ResultInspectorPanelProps {
     turn: ConversationTurn | null;
     retryDisabled: boolean;
     onRetry: (turnId: string) => void;
+    /** Renders DebugPanel below ExecutionTrace when true and the turn has a
+     * result. Off by default — see Sidebar.tsx's Debug Mode toggle. */
+    debugMode: boolean;
 }
 
 // The panel sits vertically centered in the band between the top margin and
@@ -33,16 +38,52 @@ export const PANEL_WIDTH = 440;
  * in the band between the top margin and the layer-switcher/chat-input
  * cluster, and internally scrollable if content ever exceeds that band.
  *
- * Deliberately a plain `overflow-y-auto` with no scroll-edge fade mask:
- * applying a CSS `mask-image` to an ancestor of elements using
- * `backdrop-filter` (every card here is `backdrop-blur-xl`) breaks the
- * browser's backdrop-filter compositing — the cards would render as solid,
- * opaque fills instead of the intended translucent glass the moment the
- * mask became active (i.e. exactly when scrolling made one active), which
- * is worse than the hard clip this trades it for. Always sharp/crisp — no
- * dimming or blur treatment tied to the input's own suggestion state.
+ * The scrollable stack itself (`overflow-y-auto`) carries no `mask-image` —
+ * putting one on an element that's an *ancestor* of `backdrop-blur-xl` cards
+ * breaks the browser's backdrop-filter compositing (they'd render as solid,
+ * opaque fills instead of translucent glass the moment the mask activates —
+ * see `docs/CHANGELOG.md`'s rendering-bug-fixes section, where an earlier
+ * version of this exact fade was removed for that reason). The top/bottom
+ * fade below instead follows the same safe pattern already used for
+ * `RadiantCard`'s halo and `QueryInput`'s popover blur: `mask-image` is
+ * applied to a small standalone sibling layer that has no card descendants
+ * of its own, so there's nothing for it to break.
  */
-export default function ResultInspectorPanel({ turn, retryDisabled, onRetry }: ResultInspectorPanelProps) {
+export default function ResultInspectorPanel({ turn, retryDisabled, onRetry, debugMode }: ResultInspectorPanelProps) {
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const [canScrollUp, setCanScrollUp] = useState(false);
+    const [canScrollDown, setCanScrollDown] = useState(false);
+
+    // Tracks real scroll position so the fade (below) only shows on the edge
+    // that actually has more content behind it — otherwise it permanently
+    // softens the query pill's top edge and the retry-row's bottom edge even
+    // when the whole stack fits with nothing to scroll to. A ResizeObserver
+    // is needed alongside the scroll listener because expanding an
+    // accordion inside the stack (ExecutionTrace, DebugPanel) changes
+    // scrollHeight without firing a 'scroll' event.
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+
+        const update = () => {
+            setCanScrollUp(el.scrollTop > 1);
+            setCanScrollDown(el.scrollTop + el.clientHeight < el.scrollHeight - 1);
+        };
+
+        update();
+        el.addEventListener("scroll", update);
+        const observer = new ResizeObserver(update);
+        observer.observe(el);
+        return () => {
+            el.removeEventListener("scroll", update);
+            observer.disconnect();
+        };
+        // Re-run whenever the panel switches to a different turn — the
+        // scrollable div is recreated (AnimatePresence keys on turn.id) and
+        // debugMode changes the stack's total height.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [turn?.id, debugMode]);
+
     return (
         // Always pointer-events-none — this wrapper spans up to 440px wide
         // on the right at all times (even before any turn exists), so it
@@ -68,7 +109,25 @@ export default function ResultInspectorPanel({ turn, retryDisabled, onRetry }: R
                         transition={{ type: "spring", stiffness: 300, damping: 30 }}
                         className="relative w-full"
                     >
+                        {/* Progressive-blur scroll edges. Each is a standalone
+                            layer with no children of its own — the mask-image
+                            lives on the SAME element that carries the
+                            backdrop-filter, never on an ancestor of the cards
+                            underneath, which is what breaks compositing (see
+                            the component doc comment above). Gated on real
+                            scroll position (canScrollUp/canScrollDown) rather
+                            than always rendered — otherwise it permanently
+                            softens the query pill's top edge and the retry
+                            row's bottom edge even when the whole stack fits
+                            with nothing behind either edge to hide. */}
+                        {canScrollUp && (
+                            <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-10 rounded-t-2xl backdrop-blur-md [mask-image:linear-gradient(to_bottom,black,transparent)]" />
+                        )}
+                        {canScrollDown && (
+                            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-10 rounded-b-2xl backdrop-blur-md [mask-image:linear-gradient(to_top,black,transparent)]" />
+                        )}
                         <div
+                            ref={scrollRef}
                             style={{
                                 pointerEvents: "auto",
                                 // Computed directly rather than a percentage —
@@ -96,6 +155,20 @@ export default function ResultInspectorPanel({ turn, retryDisabled, onRetry }: R
                             </div>
                             <ResultPanel result={turn.result} loading={turn.loading} error={turn.error} />
                             <ExecutionTrace trace={turn.result?.execution_trace ?? null} />
+                            {/* Also renders for a failed turn (result null, error
+                                set) — a failure is exactly when this panel is
+                                most worth having, and the request side is fully
+                                known client-side even with no trace. */}
+                            {debugMode && !turn.loading && (turn.result || turn.error) && (
+                                <DebugPanel
+                                    query={turn.query}
+                                    imageNames={turn.images.map((img) => img.file.name)}
+                                    modalities={turn.images.map((img) => img.modality)}
+                                    result={turn.result}
+                                    error={turn.error}
+                                    debugRequested={turn.result?.execution_trace?.debug ?? false}
+                                />
+                            )}
                             {!turn.loading && (
                                 <MessageActions
                                     text={turn.result?.answer ?? null}

@@ -64,6 +64,38 @@ export default function Home() {
   const [activeSessionId, setActiveSessionId] = useState<string>(() => sessions[0].id);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  // Debug Mode — surfaces real router/model telemetry per turn (see
+  // DebugPanel.tsx). Persisted across reloads like a normal app setting.
+  //
+  // Deliberately initialized to `false` and hydrated from localStorage in an
+  // effect, NOT in a lazy useState initializer: this is a client component
+  // but Next still prerenders it on the server, where the initializer would
+  // return false while the client's hydration render returned true. That
+  // mismatch reaches the DOM (Sidebar's Debug button renders a different
+  // className and aria-pressed), and React 19 responds by discarding the
+  // whole SSR tree and client-rendering the root. Reading after mount keeps
+  // the first client render identical to the server's.
+  const [debugMode, setDebugMode] = useState(false);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem("satquery.debug") === "true") {
+        setDebugMode(true);
+      }
+    } catch {
+      // Storage unavailable (private browsing, blocked cookies) — Debug Mode
+      // still works for this session, it just won't persist.
+    }
+  }, []);
+
+  const handleToggleDebugMode = () => {
+    const next = !debugMode;
+    setDebugMode(next);
+    try {
+      window.localStorage.setItem("satquery.debug", String(next));
+    } catch {
+      // Storage disabled — debug mode still works for this session.
+    }
+  };
 
   const [draftQuery, setDraftQuery] = useState("");
   const [draftImages, setDraftImages] = useState<UploadedImage[]>([]);
@@ -613,7 +645,7 @@ export default function Home() {
 
     const files = draftImages.map((img) => img.file);
     const modalities = draftImages.map((img) => img.modality);
-    analyze(files, turn.query, modalities);
+    analyze(files, turn.query, modalities, debugMode);
 
     if (draftImages.length > 0) {
       fetchRasterAndFly(activeSession.id, turn.id, draftImages);
@@ -648,7 +680,7 @@ export default function Home() {
 
     const files = turn.images.map((img) => img.file);
     const modalities = turn.images.map((img) => img.modality);
-    analyze(files, turn.query, modalities);
+    analyze(files, turn.query, modalities, debugMode);
 
     landingElementsRef.current.get(turnId)?.scrollIntoView({ behavior: "smooth", block: "start" });
 
@@ -711,6 +743,7 @@ export default function Home() {
         turn={activeSession?.turns.find((t) => t.id === revealedTurnId) ?? null}
         retryDisabled={loading}
         onRetry={handleRetry}
+        debugMode={debugMode}
       />
 
       <div className="relative z-30 flex h-full">
@@ -725,6 +758,8 @@ export default function Home() {
           onRenameSession={handleRenameSession}
           onDeleteSession={handleDeleteSession}
           onOpenLibrary={() => setLibraryOpen(true)}
+          debugMode={debugMode}
+          onToggleDebugMode={handleToggleDebugMode}
         />
       </div>
 

@@ -13,6 +13,7 @@ import {
     Trash2,
     Check,
     X,
+    Bug,
 } from "lucide-react";
 import type { ChatSession } from "@/types/api";
 
@@ -27,6 +28,8 @@ interface SidebarProps {
     onRenameSession: (id: string, title: string) => void;
     onDeleteSession: (id: string) => void;
     onOpenLibrary: () => void;
+    debugMode: boolean;
+    onToggleDebugMode: () => void;
 }
 
 export default function Sidebar({
@@ -40,6 +43,8 @@ export default function Sidebar({
     onRenameSession,
     onDeleteSession,
     onOpenLibrary,
+    debugMode,
+    onToggleDebugMode,
 }: SidebarProps) {
     const [search, setSearch] = useState("");
     const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -130,6 +135,30 @@ export default function Sidebar({
                 >
                     <LayoutGrid className="h-4 w-4 shrink-0" />
                     {!collapsed && <span className="text-sm">Library</span>}
+                </button>
+
+                {/* Debug Mode — surfaces real router/model telemetry in the
+                    result panel (see DebugPanel.tsx). No switch-style control
+                    exists anywhere else in this app, so this stays a ghost
+                    button with an active tint, same language as Pin's
+                    on-state, rather than inventing a new toggle affordance. */}
+                <button
+                    type="button"
+                    onClick={onToggleDebugMode}
+                    className={`flex w-full items-center gap-3 rounded-2xl transition-colors ${collapsed ? "justify-center px-0 py-2.5" : "px-4 py-2.5"
+                        } ${debugMode
+                            ? "bg-white/10 text-amber-300"
+                            : "text-slate-300 hover:bg-white/10"
+                        }`}
+                    aria-pressed={debugMode}
+                    // The label span is hidden when the sidebar is collapsed,
+                    // which would otherwise leave an icon-only button with no
+                    // accessible name.
+                    aria-label="Debug Mode"
+                    title="Debug Mode"
+                >
+                    <Bug className="h-4 w-4 shrink-0" />
+                    {!collapsed && <span className="text-sm">Debug Mode</span>}
                 </button>
             </div>
 
