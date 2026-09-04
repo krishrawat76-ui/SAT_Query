@@ -39,6 +39,15 @@ class Settings:
     MAX_UPLOAD_SIZE_MB: int = 50
     TEMP_DIR: str = os.environ.get("TEMP_DIR", "/tmp/satquery")
 
+    # ── Debug ──
+    # Default for the execution trace's per-step payload snapshots when a
+    # request doesn't pass ?debug explicitly. Snapshotting costs real CPU on
+    # large model outputs, so it stays off unless asked for; every other
+    # telemetry field in the trace is always on.
+    DEBUG_TRACE: bool = os.environ.get("SATQUERY_DEBUG", "").lower() in (
+        "1", "true", "yes",
+    )
+
 
 settings = Settings()
 

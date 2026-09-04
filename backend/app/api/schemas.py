@@ -5,7 +5,7 @@ Agreed contract between M1 (Backend), M2 (Frontend), M3 (Agent).
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Any, Optional
 
 
 class EvidenceImage(BaseModel):
@@ -28,14 +28,49 @@ class Evidence(BaseModel):
     regions: list[BoundingRegion] = []
 
 
+class ModelTelemetry(BaseModel):
+    """Real, model-reported inference counters.
+
+    Populated only by wrappers that can genuinely measure them — today that
+    is QwenVLMWrapper on a machine with weights present. Every stub wrapper
+    and every no-weights fallback leaves this None rather than guessing.
+    """
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    generation_time_ms: Optional[float] = None
+    tokens_per_sec: Optional[float] = None
+    max_new_tokens: Optional[int] = None
+    device: Optional[str] = None
+
+
 class PipelineStep(BaseModel):
     """A single step in the execution pipeline."""
     step: int
     model: str
     action: str
     status: str
+    # Total wall clock for the step (load + inference) — unchanged meaning.
     time_ms: float
     error: Optional[str] = None
+
+    # ── Telemetry (Phase 4), all measured ──
+    # Time inside ModelRegistry.get(). Previously folded into time_ms and
+    # misreported as inference cost.
+    load_time_ms: float = 0.0
+    inference_time_ms: float = 0.0
+    # False when this step paid a cold load; explains load_time_ms spikes.
+    model_was_cached: bool = True
+    # Offset from pipeline start, so a waterfall shows real gaps rather than
+    # assuming steps are contiguous.
+    started_at_ms: float = 0.0
+    telemetry: Optional[ModelTelemetry] = None
+    # JSON-safe, size-bounded view of the step's raw output. None unless the
+    # request opted into debug mode.
+    payload_snapshot: Optional[Any] = None
+    payload_bytes: Optional[int] = None
+    # Reserved for a future DAG executor. The current executor is a strictly
+    # linear loop, so this stays None rather than synthesizing [n-1].
+    depends_on: Optional[list[int]] = None
 
 
 class ValidationInfo(BaseModel):
@@ -49,6 +84,95 @@ class ValidationInfo(BaseModel):
     warnings: list[str] = []
 
 
+class SelectedModel(BaseModel):
+    """A model the router selected, with its real registry state."""
+    name: str
+    # The pipeline actions this model was actually assigned, in step order.
+    actions: list[str] = []
+    steps: list[int] = []
+    # Registry facts, read at trace time — not invented.
+    registered: bool = True
+    loaded: bool = False
+    vram_gb: Optional[float] = None
+    # No wrapper exposes a version string today (the registry stores only a
+    # loader and a VRAM estimate). Previously hardcoded "1.0"; now honestly
+    # null until a wrapper declares one.
+    version: Optional[str] = None
+    # Mechanically composed from the router's own rule and this model's
+    # assigned actions — never hand-written per-model justification prose.
+    selection_reason: str = ""
+
+
+class RouterMetadata(BaseModel):
+    """How the routing decision was actually produced.
+
+    Split deliberately into two halves: fields the in-repo RuleBasedRouter
+    can genuinely report, and fields only an LLM planner could report. The
+    latter are Optional and are null in this repo — they exist so a future
+    LLM-planner router can populate them without a breaking schema change.
+    They are never filled with placeholder values.
+    """
+    # ── Real: the router that actually ran ──
+    router_type: str
+    router_version: str
+    rule_id: str
+    matched_rule: str
+    matched_keywords: list[str] = []
+    fallback_used: bool = False
+    routing_time_ms: float = 0.0
+
+    # ── Optional: only an LLM planner can report these ──
+    # This repo's router is deterministic keyword matching with zero VRAM and
+    # no language model in the control path, so all of these are null here.
+    planner_type: Optional[str] = None
+    planning_time_ms: Optional[float] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    tokens_per_sec: Optional[float] = None
+    intent_decomposition: Optional[list[dict]] = None
+    planner_raw_output: Optional[str] = None
+
+
+class StageTimings(BaseModel):
+    """Wall-clock breakdown of the request handler. All measured."""
+    upload_ms: float = 0.0
+    validation_ms: float = 0.0
+    routing_ms: float = 0.0
+    execution_ms: float = 0.0
+    integration_ms: float = 0.0
+    # Sum of PipelineStep.time_ms — what total_time_ms used to (wrongly) be.
+    pipeline_steps_ms: float = 0.0
+    # total_time_ms minus the measured stages: trace building, response
+    # assembly, and everything else inside the handler.
+    other_ms: float = 0.0
+
+
+class ImageComposition(BaseModel):
+    """Per-image facts, straight from InputValidator.format_info."""
+    filename: str = ""
+    width: int = 0
+    height: int = 0
+    bands: int = 0
+    format: str = "unknown"
+    file_size_mb: float = 0.0
+    modality: Optional[str] = None
+    # Client-supplied capture date, when the caller sent `dates`.
+    date: Optional[str] = None
+
+
+class InputComposition(BaseModel):
+    """What actually arrived, in more detail than ValidationInfo."""
+    images: list[ImageComposition] = []
+    total_pixels: int = 0
+    total_size_mb: float = 0.0
+    is_temporal: bool = False
+    is_cross_modal: bool = False
+    # The backend never reads GeoTIFF CRS today (EPSG is parsed and then
+    # discarded client-side in geotiffClient.ts). Null until that moves
+    # server-side — never assumed to be EPSG:4326.
+    crs: Optional[str] = None
+
+
 class ExecutionTrace(BaseModel):
     """Full execution trace — makes agent decisions transparent."""
     input_validation: ValidationInfo
@@ -58,9 +182,21 @@ class ExecutionTrace(BaseModel):
     # model) — never a fabricated number.
     task_confidence: Optional[float] = None
     reasoning: str
-    selected_models: list[dict]
+    selected_models: list[SelectedModel]
     pipeline_steps: list[PipelineStep]
+    # Server-side handler wall clock: upload read → response assembled.
+    # Previously this was sum(step.time_ms), which excluded upload,
+    # validation, routing and integration and so was never request latency.
+    # The old figure is preserved as timings.pipeline_steps_ms.
     total_time_ms: float
+
+    # ── Added in Phase 4 ──
+    request_id: Optional[str] = None
+    router_metadata: Optional[RouterMetadata] = None
+    timings: Optional[StageTimings] = None
+    input_composition: Optional[InputComposition] = None
+    # True when this request opted into payload snapshots.
+    debug: bool = False
 
 
 class AnalysisResponse(BaseModel):

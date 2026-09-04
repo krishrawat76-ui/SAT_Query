@@ -80,16 +80,23 @@ class ModelRegistry:
             raise
 
     def _ensure_vram(self, needed_gb: float, exclude: str = ""):
-        """Unload models until enough VRAM is free."""
+        """Unload models until enough VRAM is free.
+
+        Uses `torch.cuda.mem_get_info()`, which reports the driver's real
+        free/total figures. The previous `total_memory - memory_allocated()`
+        was wrong twice over: `memory_allocated()` counts only PyTorch's
+        live tensors (ignoring its own cached reserve and every other
+        process on the GPU), and the attribute was misspelled `total_mem`,
+        which raised AttributeError on any actual CUDA box — and since only
+        ImportError is caught below, that escaped `_load()` and made every
+        model load fail.
+        """
         try:
             import torch
             if not torch.cuda.is_available():
                 return
 
-            free = (
-                torch.cuda.get_device_properties(0).total_mem
-                - torch.cuda.memory_allocated()
-            ) / 1e9
+            free = torch.cuda.mem_get_info()[0] / 1e9
 
             while free < needed_gb and self._models:
                 # Unload the oldest loaded model (FIFO)
@@ -98,13 +105,12 @@ class ModelRegistry:
                     break
                 oldest = candidates[0]
                 self.unload(oldest)
-                free = (
-                    torch.cuda.get_device_properties(0).total_mem
-                    - torch.cuda.memory_allocated()
-                ) / 1e9
+                free = torch.cuda.mem_get_info()[0] / 1e9
 
         except ImportError:
-            # No torch — skip VRAM management (CPU mode)
+            # No torch — skip VRAM management (CPU mode). Deliberately narrow:
+            # any other failure here should stay loud rather than silently
+            # disabling VRAM management.
             pass
 
     def unload(self, name: str):
@@ -139,3 +145,24 @@ class ModelRegistry:
             }
             for name, config in self._configs.items()
         ]
+
+    def describe(self, name: str) -> dict:
+        """Registry facts about a model, whether or not it is registered.
+
+        Used by the execution trace instead of inventing metadata. There is
+        deliberately no capability/description data here: the registry stores
+        only a loader and a VRAM estimate, so anything richer would be made
+        up. `version` reads whatever the wrapper instance declares — None for
+        every wrapper today, and it lights up on its own the day one sets it.
+
+        `registered: False` is meaningful: the router hardcodes model-name
+        literals, so a rename in main.py surfaces here rather than as an
+        unexplained step failure.
+        """
+        config = self._configs.get(name)
+        return {
+            "registered": config is not None,
+            "loaded": name in self._models,
+            "vram_gb": config["vram_gb"] if config else None,
+            "version": getattr(self._models.get(name), "version", None),
+        }

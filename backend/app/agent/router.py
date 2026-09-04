@@ -22,6 +22,11 @@ from enum import Enum
 from dataclasses import dataclass, field
 
 
+# Bumped whenever the routing rules themselves change, so a stored trace can
+# be interpreted against the ruleset that actually produced it.
+ROUTER_VERSION = "rule_based_keyword/1"
+
+
 class TaskType(Enum):
     """All supported task types for the agentic pipeline."""
     VQA = "vqa"
@@ -39,12 +44,21 @@ class RoutingDecision:
     No `confidence` field: this is a deterministic keyword/rule-based
     classifier, not a learned model — it has no real notion of "how sure"
     it is about a match, so it doesn't fabricate one. `reasoning` carries
-    the actual justification for the decision instead.
+    the actual justification for the decision instead. The telemetry fields
+    below exist to explain a decision, not to score it — do not "complete
+    the set" by adding a confidence back.
     """
     task_type: TaskType
     models: list[str]
     pipeline: list[dict]
     reasoning: str
+    # Stable identifier for the branch that fired, so telemetry can group
+    # and compare decisions without parsing the prose in `reasoning`.
+    rule_id: str = ""
+    # The actual keyword substrings that matched this query. Empty for
+    # branches that match on input structure (image count/modality) rather
+    # than on query text.
+    matched_keywords: list[str] = field(default_factory=list)
 
 
 class RuleBasedRouter:
@@ -110,6 +124,7 @@ class RuleBasedRouter:
                     {"step": 1, "model": "rs_vlm", "action": "answer_question"},
                 ],
                 reasoning="No images attached → conversational response, no image pipeline run.",
+                rule_id="text_only",
             )
 
         # ── Cross-modal → always Optical-SAR ──
@@ -122,6 +137,7 @@ class RuleBasedRouter:
                     {"step": 2, "model": "rs_vlm", "action": "analyze_fused"},
                 ],
                 reasoning="Cross-modal input detected (optical + SAR) → Optical-SAR fusion pipeline",
+                rule_id="cross_modal",
             )
 
         # ── Bi-temporal (2 images, same modality) ──
@@ -136,6 +152,8 @@ class RuleBasedRouter:
                         {"step": 2, "model": "change_vqa", "action": "answer_change_question"},
                     ],
                     reasoning="Bi-temporal input + specific change question → Change VQA pipeline",
+                    rule_id="bitemporal_specific",
+                    matched_keywords=self._matched_kw(q, self.CHANGE_KW),
                 )
             return RoutingDecision(
                 task_type=TaskType.CHANGE_DETECTION,
@@ -145,6 +163,8 @@ class RuleBasedRouter:
                     {"step": 2, "model": "rs_vlm", "action": "describe_changes"},
                 ],
                 reasoning="Bi-temporal input + general query → Change Detection pipeline",
+                rule_id="bitemporal_general",
+                matched_keywords=self._matched_kw(q, self.CHANGE_KW),
             )
 
         # ── Single image: Grounding ──
@@ -157,6 +177,8 @@ class RuleBasedRouter:
                     {"step": 2, "model": "sam", "action": "segment_regions"},
                 ],
                 reasoning="Grounding keywords detected in query → Grounding pipeline (DINO + SAM)",
+                rule_id="grounding_keywords",
+                matched_keywords=self._matched_kw(q, self.GROUNDING_KW),
             )
 
         # ── Single image: Caption ──
@@ -168,6 +190,8 @@ class RuleBasedRouter:
                     {"step": 1, "model": "rs_vlm", "action": "generate_caption"},
                 ],
                 reasoning="Caption/description keywords detected → Caption mode via VLM",
+                rule_id="caption_keywords",
+                matched_keywords=self._matched_kw(q, self.CAPTION_KW),
             )
 
         # ── Default: VQA ──
@@ -178,8 +202,14 @@ class RuleBasedRouter:
                 {"step": 1, "model": "rs_vlm", "action": "answer_question"},
             ],
             reasoning="General question → Visual Question Answering via VLM",
+            rule_id="default_vqa",
         )
+
+    def _matched_kw(self, query: str, keywords: list[str]) -> list[str]:
+        """The keyword substrings that actually matched — real evidence for
+        why a branch fired, surfaced in the execution trace."""
+        return [kw for kw in keywords if kw in query]
 
     def _has_kw(self, query: str, keywords: list[str]) -> bool:
         """Check if any keyword appears in the query."""
-        return any(kw in query for kw in keywords)
+        return bool(self._matched_kw(query, keywords))

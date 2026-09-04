@@ -6,6 +6,7 @@ This ensures the PipelineExecutor can call any model uniformly.
 """
 
 from abc import ABC, abstractmethod
+from typing import Optional
 
 
 class BaseModelWrapper(ABC):
@@ -15,6 +16,18 @@ class BaseModelWrapper(ABC):
     Every model must implement the `run` method with a standard signature.
     The PipelineExecutor calls `model.run(action, context)` for each pipeline step.
     """
+
+    # Optional telemetry side-channel. A wrapper that can genuinely measure
+    # its own inference (token counts, generation time) sets this to a dict
+    # after run(); PipelineExecutor reads it into the execution trace.
+    # Wrappers that cannot measure anything leave it None — never a
+    # placeholder value.
+    #
+    # Deliberately an attribute rather than a key in run()'s return dict:
+    # that return value flows into OutputIntegrator and on into the API
+    # response, so telemetry riding along in it would need filtering and
+    # could leak into user-facing evidence.
+    last_telemetry: Optional[dict] = None
 
     @abstractmethod
     def run(self, action: str, context: dict) -> dict:

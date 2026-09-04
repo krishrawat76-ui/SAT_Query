@@ -180,3 +180,62 @@ def test_routing_decision_has_pipeline():
     assert "step" in result.pipeline[0]
     assert "model" in result.pipeline[0]
     assert "action" in result.pipeline[0]
+
+
+# ── Telemetry (Phase 4) ──
+
+ROUTE_CASES = [
+    ("Describe this scene", {"num_images": 1, "modalities": ["optical"]}, "caption_keywords"),
+    ("Highlight the river", {"num_images": 1, "modalities": ["optical"]}, "grounding_keywords"),
+    ("How many buildings are there?", {"num_images": 1, "modalities": ["optical"]}, "default_vqa"),
+    ("What changed?", {"num_images": 2, "modalities": ["optical", "optical"]}, "bitemporal_general"),
+    ("Has the built-up area increased?", {"num_images": 2, "modalities": ["optical", "optical"]}, "bitemporal_specific"),
+    ("Analyze with both", {"num_images": 2, "modalities": ["optical", "sar"]}, "cross_modal"),
+    ("What can you do?", {"num_images": 0, "modalities": []}, "text_only"),
+]
+
+
+def test_every_branch_reports_its_own_rule_id():
+    """rule_id lets telemetry group decisions without parsing prose."""
+    router = RuleBasedRouter()
+    seen = set()
+    for query, info, expected in ROUTE_CASES:
+        result = router.route(query, info)
+        assert result.rule_id == expected, f"'{query}' → {result.rule_id}"
+        seen.add(result.rule_id)
+    assert len(seen) == len(ROUTE_CASES), "rule ids must be distinct per branch"
+
+
+def test_matched_keywords_are_real_substrings_of_the_query():
+    """These are shown in the debug panel as the evidence for a decision, so
+    they must be what actually matched — not a copy of the keyword list."""
+    router = RuleBasedRouter()
+    for query, info, _ in ROUTE_CASES:
+        result = router.route(query, info)
+        for keyword in result.matched_keywords:
+            assert keyword in query.lower(), f"'{keyword}' not in '{query}'"
+
+
+def test_all_routed_models_are_registered():
+    """The router hardcodes model-name literals and never consults the
+    registry, so a rename in main.py would only surface at runtime as a step
+    failure. This catches that drift at test time."""
+    from app.models.registry import ModelRegistry
+
+    registry = ModelRegistry()
+    for name, vram in [
+        ("rs_vlm", 5.5), ("grounding_dino", 0.7), ("sam", 0.35),
+        ("change_detection", 0.15), ("change_vqa", 5.5), ("optical_sar_fusion", 0.5),
+    ]:
+        registry.register(name, lambda: object(), vram_gb=vram)
+
+    registered = {m["name"] for m in registry.list_all()}
+    router = RuleBasedRouter()
+    for query, info, _ in ROUTE_CASES:
+        decision = router.route(query, info)
+        for model_name in decision.models:
+            assert model_name in registered, (
+                f"Router selects unregistered model '{model_name}' for '{query}'"
+            )
+        for step in decision.pipeline:
+            assert step["model"] in registered
