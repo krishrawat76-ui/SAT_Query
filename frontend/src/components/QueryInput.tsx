@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowUp, Loader2, Plus } from "lucide-react";
 import ImageUpload, { AttachmentChips } from "./ImageUpload";
+import LayerSwitcher from "./LayerSwitcher";
 import RadiantCard from "./RadiantCard";
-import type { UploadedImage, Modality } from "@/types/api";
+import type { LayerKey, RasterLayers, UploadedImage, Modality } from "@/types/api";
 
 interface QueryInputProps {
     query: string;
@@ -17,6 +18,12 @@ interface QueryInputProps {
     /** Width (px) of the sidebar currently docked on the left, so the pill
      * centers within the remaining satellite workspace, not the full viewport. */
     sidebarWidth: number;
+    /** Raster layer switcher — only rendered when the current turn has raster
+     * data AND at least 2 of its layers actually have a real URL. */
+    layerSwitcherVisible: boolean;
+    activeLayer: LayerKey;
+    onActiveLayerChange: (key: LayerKey) => void;
+    layers: RasterLayers | null;
 }
 
 const SUGGESTIONS = [
@@ -35,6 +42,10 @@ export default function QueryInput({
     onSubmit,
     loading,
     sidebarWidth,
+    layerSwitcherVisible,
+    activeLayer,
+    onActiveLayerChange,
+    layers,
 }: QueryInputProps) {
     const [focused, setFocused] = useState(false);
     const [attachOpen, setAttachOpen] = useState(false);
@@ -130,6 +141,18 @@ export default function QueryInput({
                         images={images}
                         onRemove={removeImage}
                         onModalityChange={updateModality}
+                    />
+                )}
+
+                {/* Hidden while typing/suggestions are open — the suggestion
+                    list sits right where this would be, and showing both
+                    made the bar read as awkwardly sandwiched between them. */}
+                {!suggestOpen && (
+                    <LayerSwitcher
+                        visible={layerSwitcherVisible}
+                        active={activeLayer}
+                        onChange={onActiveLayerChange}
+                        layers={layers}
                     />
                 )}
 

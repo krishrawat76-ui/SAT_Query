@@ -211,17 +211,23 @@ def zoom_for_bbox(bbox: dict) -> float:
     return float(min(18.0, max(2.0, raw_zoom)))
 
 
-def generate_layers(image_path: str, request_id: str) -> dict[str, str]:
+def generate_layers(image_path: str, request_id: str) -> dict[str, Optional[str]]:
     """Save the real uploaded image as the map's base raster layer.
 
-    Previously this also fabricated "structural_changes" and "spectral_bands"
-    PNGs: a fixed two-blob red overlay and a fixed channel remap, drawn
-    identically on any image regardless of content, with no real
-    change-detection or spectral model behind either one. Removed — there is
-    no real model in this repo that produces either of those outputs (TinyCD
-    and a spectral pipeline were never implemented), so faking them was pure
-    fabrication rather than a placeholder for something that would soon be
-    real. Only the base layer — the actual uploaded image — is generated.
+    `structural_changes`/`spectral_bands` are explicitly `None` — this used
+    to fabricate them (a fixed two-blob red overlay and a fixed channel
+    remap, drawn identically on any image regardless of content), with no
+    real change-detection or spectral model behind either one. There is no
+    such model in this repo (TinyCD and a spectral pipeline were never
+    implemented), so faking the images was pure fabrication, not a
+    placeholder for something that would soon be real.
+
+    They stay in the returned dict as `None` rather than being dropped, so
+    the response shape matches `RasterLayers` exactly and a future real
+    model (TinyCD for `structural_changes`, say) only has to change this
+    function's return value — nothing downstream needs updating, since the
+    frontend already renders a tab for a layer only when its value here is
+    a real URL.
     """
     out_dir = ensure_results_dir(request_id)
 
@@ -236,4 +242,6 @@ def generate_layers(image_path: str, request_id: str) -> dict[str, str]:
 
     return {
         "base": f"/results/{request_id}/raster_base.png",
+        "structural_changes": None,
+        "spectral_bands": None,
     }

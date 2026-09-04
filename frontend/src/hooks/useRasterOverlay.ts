@@ -3,11 +3,15 @@
 import { useRef } from "react";
 import axios from "axios";
 import * as maplibregl from "maplibre-gl";
-import type { ProcessRasterResponse, RasterBBox, RasterLayers } from "@/types/api";
+import type { LayerKey, ProcessRasterResponse, RasterBBox, RasterLayers } from "@/types/api";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-const BASE_SOURCE_ID = "raster-base";
+const LAYER_IDS: Record<LayerKey, string> = {
+    base: "raster-base",
+    structural_changes: "raster-structural",
+    spectral_bands: "raster-spectral",
+};
 
 function boxCoordinates(
     bbox: RasterBBox
@@ -24,21 +28,29 @@ function resolveUrl(path: string): string {
     return path.startsWith("http") ? path : `${API}${path}`;
 }
 
+/** Layer keys that actually have a real URL for this turn — everything else
+ * is `null` until a real model produces it (see `RasterLayers` in
+ * types/api.ts). Shared by `page.tsx` (wheel-cycle order) and
+ * `LayerSwitcher` (which tabs to render). */
+export function availableLayerKeys(layers: RasterLayers): LayerKey[] {
+    return (Object.keys(LAYER_IDS) as LayerKey[]).filter((key) => !!layers[key]);
+}
+
 /**
  * Network call to the raster stub, plus imperative MapLibre control for the
- * uploaded image's base raster layer. Kept ref-based like `useMapCamera` —
- * visibility is a paint-property flip, never React state.
+ * stacked analysis layers it returns. Kept ref-based like `useMapCamera` —
+ * layer visibility is a paint-property flip, never React state, so tab
+ * switches never trigger a re-render of the map itself.
  *
- * There used to be three stacked layers here (base / structural_changes /
- * spectral_bands) with a tab switcher between them. The latter two were a
- * fixed image transform applied to any upload, with no real change-detection
- * or spectral model behind either — removed as fabricated data. Only the
- * real uploaded image (`base`) remains, so there is nothing left to switch
- * between.
+ * Only `base` is guaranteed to have a real URL today — `structural_changes`/
+ * `spectral_bands` are `null` until a real model (TinyCD, a spectral
+ * pipeline) actually produces one. `ensureLayers` skips adding a source for
+ * any layer that's null, and hides a previous turn's leftover layer if the
+ * current turn doesn't have one at that key.
  */
 export function useRasterOverlay() {
     const mapRef = useRef<maplibregl.Map | null>(null);
-    const layerAddedRef = useRef(false);
+    const layersAddedRef = useRef(false);
 
     const setMap = (map: maplibregl.Map) => {
         mapRef.current = map;
@@ -51,39 +63,73 @@ export function useRasterOverlay() {
         return res.data as ProcessRasterResponse;
     };
 
-    /** Adds/updates the base raster layer at full opacity. */
-    const showRaster = (bbox: RasterBBox, layers: RasterLayers) => {
+    const ensureLayers = (bbox: RasterBBox, layers: RasterLayers, active: LayerKey) => {
         const map = mapRef.current;
         if (!map) return;
         const coordinates = boxCoordinates(bbox);
-        const url = resolveUrl(layers.base);
-        const existingSource = map.getSource(BASE_SOURCE_ID) as maplibregl.ImageSource | undefined;
 
-        if (existingSource) {
-            existingSource.setCoordinates(coordinates);
-            existingSource.updateImage({ url });
-            map.setPaintProperty(BASE_SOURCE_ID, "raster-opacity", 1);
-        } else {
-            map.addSource(BASE_SOURCE_ID, { type: "image", url, coordinates });
-            map.addLayer({
-                id: BASE_SOURCE_ID,
-                type: "raster",
-                source: BASE_SOURCE_ID,
-                paint: {
-                    "raster-opacity": 1,
-                    "raster-opacity-transition": { duration: 300 },
-                },
-            });
-        }
+        (Object.keys(LAYER_IDS) as LayerKey[]).forEach((key) => {
+            const sourceId = LAYER_IDS[key];
+            const url = layers[key];
 
-        layerAddedRef.current = true;
+            if (!url) {
+                // Not available for this turn — if a previous turn's source
+                // is still sitting there, hide it rather than leaving it
+                // visible on top of the new turn's imagery.
+                if (map.getLayer(sourceId)) {
+                    map.setPaintProperty(sourceId, "raster-opacity", 0);
+                }
+                return;
+            }
+
+            const resolved = resolveUrl(url);
+            const existingSource = map.getSource(sourceId) as maplibregl.ImageSource | undefined;
+
+            if (existingSource) {
+                existingSource.setCoordinates(coordinates);
+                existingSource.updateImage({ url: resolved });
+            } else {
+                map.addSource(sourceId, { type: "image", url: resolved, coordinates });
+                map.addLayer({
+                    id: sourceId,
+                    type: "raster",
+                    source: sourceId,
+                    paint: {
+                        "raster-opacity": key === active ? 1 : 0,
+                        "raster-opacity-transition": { duration: 300 },
+                    },
+                });
+            }
+        });
+
+        layersAddedRef.current = true;
     };
 
-    /** Fades the layer out (source stays alive, cheap to bring back). */
+    /** Adds/updates whichever layers this turn actually has and shows `active` on top. */
+    const showRaster = (bbox: RasterBBox, layers: RasterLayers, active: LayerKey = "base") => {
+        ensureLayers(bbox, layers, active);
+        setActiveLayer(active);
+    };
+
+    /** Crossfades to `active` via MapLibre's own opacity transition — no camera movement. */
+    const setActiveLayer = (active: LayerKey) => {
+        const map = mapRef.current;
+        if (!map || !layersAddedRef.current) return;
+        (Object.keys(LAYER_IDS) as LayerKey[]).forEach((key) => {
+            const sourceId = LAYER_IDS[key];
+            if (!map.getLayer(sourceId)) return;
+            map.setPaintProperty(sourceId, "raster-opacity", key === active ? 1 : 0);
+        });
+    };
+
+    /** Fades all layers out (sources stay alive, cheap to bring back). */
     const hideRaster = () => {
         const map = mapRef.current;
-        if (!map || !layerAddedRef.current || !map.getLayer(BASE_SOURCE_ID)) return;
-        map.setPaintProperty(BASE_SOURCE_ID, "raster-opacity", 0);
+        if (!map || !layersAddedRef.current) return;
+        Object.values(LAYER_IDS).forEach((sourceId) => {
+            if (!map.getLayer(sourceId)) return;
+            map.setPaintProperty(sourceId, "raster-opacity", 0);
+        });
     };
 
     /** Screen-space bounding rect of the bbox's 4 corners, for the focus mask. */
@@ -107,6 +153,7 @@ export function useRasterOverlay() {
         setMap,
         processRaster,
         showRaster,
+        setActiveLayer,
         hideRaster,
         getScreenRect,
         resolveUrl,

@@ -48,7 +48,7 @@ export function syntheticRasterFallback(file: File): ProcessRasterResponse {
         },
         center: [centerLng, centerLat],
         zoom: 15,
-        layers: { base: "" },
+        layers: { base: "", structural_changes: null, spectral_bands: null },
         source: "synthetic",
     };
 }

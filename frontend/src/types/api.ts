@@ -82,7 +82,15 @@ export interface RasterBBox {
 
 export interface RasterLayers {
     base: string;
+    // null until a real model actually produces one (TinyCD for change
+    // detection, a real spectral pipeline for spectral bands) — never a
+    // fabricated placeholder image. A tab renders for a layer only when
+    // its value here is a real URL; see LayerSwitcher.tsx.
+    structural_changes: string | null;
+    spectral_bands: string | null;
 }
+
+export type LayerKey = keyof RasterLayers;
 
 export interface ProcessRasterResponse {
     bbox: RasterBBox;

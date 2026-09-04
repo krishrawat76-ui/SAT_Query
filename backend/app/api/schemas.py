@@ -227,14 +227,22 @@ class RasterBBox(BaseModel):
 
 
 class RasterLayers(BaseModel):
-    """URL for the map's base raster layer, served from /results.
+    """URLs for the map's raster layers, served from /results.
 
-    Previously also carried `structural_changes`/`spectral_bands` — fixed
-    image transforms with no real change-detection or spectral model behind
-    them, applied identically regardless of the uploaded image's content.
-    Removed as fabricated data; only the real uploaded image remains.
+    Only `base` (the real uploaded image) is generated today. The other two
+    are `None` until a real model actually produces one — a TinyCD change
+    map for `structural_changes`, a real spectral/false-color pipeline for
+    `spectral_bands` — never a fabricated placeholder image standing in for
+    either. Both used to be fixed image transforms applied identically to
+    any upload regardless of content; that fabricated version was deleted
+    outright. This time the fields stay in the contract, honestly null,
+    so a real model can populate them later with no schema change, the
+    same pattern already used for `task_confidence`/`confidence` and the
+    LLM-planner fields in `RouterMetadata`.
     """
     base: str
+    structural_changes: Optional[str] = None
+    spectral_bands: Optional[str] = None
 
 
 class ProcessRasterResponse(BaseModel):

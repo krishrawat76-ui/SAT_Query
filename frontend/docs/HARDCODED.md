@@ -142,23 +142,36 @@ history/context since old demo recordings or screenshots may reference them.
   900`, `padding_factor = 2.5` (~150% padding) are fixed assumptions about
   the map's actual on-screen size, not read from a real viewport. Outer
   clamp `[2, 18]` (was `[14, 16]` before this phase — see `CHANGELOG.md`).
-- **[REMOVED] `app/output/raster_stub.py` (`generate_layers`)** —
-  `structural_changes.png` used to draw **two fixed-position circular
-  blobs** (`cx1,cy1 = 0.3w,0.35h` radius `0.12·min(w,h)`; `cx2,cy2 =
-  0.65w,0.6h` radius `0.09·min(w,h)`) in a fixed red tint (`(255,60,60)` at
-  `alpha=0.55`) — not a real change-detection model, always the same two
-  blob positions relative to any image's size. `spectral_bands.png` was a
-  fixed, arbitrary channel remap (`R = luminance*1.3`, `G` rolled by `w/3`
-  pixels, `B = 255-luminance`) — cosmetic, not a real NDVI/thermal band
-  computation. Both were deleted (Phase 4) — there is no real
-  change-detection or spectral model in this repo that either output stood
-  in for, so this was pure fabrication rather than a placeholder for
-  something that would soon be real. `generate_layers` now saves only the
-  real uploaded image as `base`. `RasterLayers` (backend schema and
-  frontend type) dropped the `structural_changes`/`spectral_bands` fields,
-  and the frontend's `LayerSwitcher` component — which had nothing left to
-  switch between with only one real layer — was deleted along with the
-  wheel-cycle handler and cooldown state in `page.tsx` that drove it.
+- **[REMOVED, then RESTORED nullable] `app/output/raster_stub.py`
+  (`generate_layers`)** — `structural_changes.png` used to draw **two
+  fixed-position circular blobs** (`cx1,cy1 = 0.3w,0.35h` radius
+  `0.12·min(w,h)`; `cx2,cy2 = 0.65w,0.6h` radius `0.09·min(w,h)`) in a fixed
+  red tint (`(255,60,60)` at `alpha=0.55`) — not a real change-detection
+  model, always the same two blob positions relative to any image's size.
+  `spectral_bands.png` was a fixed, arbitrary channel remap (`R =
+  luminance*1.3`, `G` rolled by `w/3` pixels, `B = 255-luminance`) —
+  cosmetic, not a real NDVI/thermal band computation. Both fake images were
+  deleted first (Phase 4) since there is no real change-detection or
+  spectral model in this repo that either output stood in for — pure
+  fabrication, not a placeholder for something that would soon be real. The
+  whole `LayerSwitcher` UI was deleted along with them, since with only one
+  real layer left there was nothing to switch between.
+  **Reconsidered**: unlike the water-mask trigger (nothing real was ever
+  going to fill that in), `structural_changes`/`spectral_bands` correspond
+  to a real planned capability — TinyCD is listed in
+  `docs/workflow/08-MODEL-RECOMMENDATIONS.md` for real change detection.
+  Restored using the same nullable pattern as `confidence` and
+  `router_metadata`'s LLM-planner fields: `generate_layers` now returns
+  `structural_changes: None, spectral_bands: None` explicitly (no fake
+  image drawn) alongside the real `base` URL; `RasterLayers` keeps both
+  fields as `Optional[str] = None` in the schema and `string | null` in the
+  TS type. `LayerSwitcher.tsx` and the multi-layer overlay logic in
+  `useRasterOverlay.ts` are back, but each tab renders only when its key
+  has a genuine URL in the response (`ALL_TABS.filter((t) =>
+  !!layers[t.key])`), and the switcher itself renders nothing at all below
+  2 real tabs — so today, with only `base` real, nothing visually changes.
+  The day a real model populates `structural_changes`, its tab appears with
+  zero frontend changes.
 - **`app/output/raster_stub.py` (`_epsg_from_geokey_directory`)** — only
   resolves EPSG codes stored directly in the GeoKeyDirectory's 4th field
   (`TIFFTagLocation == 0`); a file storing its CRS key indirectly (via the
