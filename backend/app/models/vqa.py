@@ -110,7 +110,7 @@ class QwenVLMWrapper(BaseModelWrapper):
         query = context["query"]
 
         if not images:
-            return {"answer": synthesize_answer(query, [], "vqa"), "confidence": 0.3}
+            return {"answer": synthesize_answer(query, [], "vqa"), "confidence": None}
 
         image_path = images[0]
 
@@ -121,7 +121,7 @@ class QwenVLMWrapper(BaseModelWrapper):
         )
 
         answer = self._infer_single(image_path, prompt)
-        return {"answer": answer, "confidence": self._estimate_confidence(answer)}
+        return {"answer": answer, "confidence": None}
 
     def _caption(self, context: dict) -> dict:
         """Generate detailed RS caption."""
@@ -138,7 +138,7 @@ class QwenVLMWrapper(BaseModelWrapper):
         )
 
         answer = self._infer_single(image_path, prompt)
-        return {"answer": answer, "confidence": self._estimate_confidence(answer)}
+        return {"answer": answer, "confidence": None}
 
     def _describe_changes(self, context: dict) -> dict:
         """Bi-temporal change description using 2 images."""
@@ -166,7 +166,7 @@ class QwenVLMWrapper(BaseModelWrapper):
         )
 
         answer = self._infer_multi(images, prompt)
-        return {"answer": answer, "confidence": self._estimate_confidence(answer)}
+        return {"answer": answer, "confidence": None}
 
     def _analyze_fused(self, context: dict) -> dict:
         """Analyze result after optical-SAR fusion."""
@@ -196,7 +196,7 @@ class QwenVLMWrapper(BaseModelWrapper):
         )
 
         answer = self._infer_multi(images, prompt)
-        return {"answer": answer, "confidence": self._estimate_confidence(answer)}
+        return {"answer": answer, "confidence": None}
 
     # ── Core Qwen inference ──
 
@@ -271,27 +271,6 @@ class QwenVLMWrapper(BaseModelWrapper):
 
         return output_text[0].strip() if output_text else "Unable to generate response."
 
-    # ── Confidence estimation ──
-
-    def _estimate_confidence(self, answer: str) -> float:
-        """
-        Heuristic confidence based on answer characteristics.
-        Longer, more detailed answers suggest higher confidence.
-        """
-        if not answer:
-            return 0.3
-
-        words = len(answer.split())
-        if words > 50:
-            return 0.88
-        elif words > 30:
-            return 0.82
-        elif words > 15:
-            return 0.75
-        elif words > 5:
-            return 0.65
-        return 0.50
-
     # ── No Output mode (no GPU / no weights) ──
 
     def _mock_run(self, action: str, context: dict) -> dict:
@@ -306,7 +285,7 @@ class QwenVLMWrapper(BaseModelWrapper):
 
         answer = synthesize_answer(context["query"], context["images"], task_hint)
         logger.info(f"[NO OUTPUT MODE] Synthesized placeholder for action: {action}")
-        # Fixed low confidence regardless of text length — this is a templated
-        # placeholder, not a real model output, so word-count heuristics would
-        # be misleading here.
-        return {"answer": answer, "confidence": 0.3}
+        # No real model ran, so there's no real confidence to report — a
+        # templated placeholder answer paired with any number (fixed or
+        # heuristic) would misrepresent it as a genuine model score.
+        return {"answer": answer, "confidence": None}

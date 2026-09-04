@@ -53,7 +53,10 @@ class ExecutionTrace(BaseModel):
     """Full execution trace — makes agent decisions transparent."""
     input_validation: ValidationInfo
     detected_task: str
-    task_confidence: float
+    # None when the router had no real confidence to report (the
+    # rule-based router is deterministic keyword matching, not a learned
+    # model) — never a fabricated number.
+    task_confidence: Optional[float] = None
     reasoning: str
     selected_models: list[dict]
     pipeline_steps: list[PipelineStep]
@@ -63,7 +66,9 @@ class ExecutionTrace(BaseModel):
 class AnalysisResponse(BaseModel):
     """Complete API response for POST /api/analyze."""
     answer: str
-    confidence: float
+    # None when no pipeline step reported a real confidence score (every
+    # stub/no-weights model path) — never a fabricated placeholder number.
+    confidence: Optional[float] = None
     evidence: Evidence
     execution_trace: ExecutionTrace
 

@@ -15,8 +15,7 @@ import { useMapCamera, type MapTarget, type FramePadding } from "@/hooks/useMapC
 import { useRasterOverlay } from "@/hooks/useRasterOverlay";
 import { type SwitcherKey } from "@/components/LayerSwitcher";
 import { syntheticRasterFallback } from "@/lib/syntheticLocation";
-import { extractGeoTiffLocation, decodeGeoTiffPreview, getGeoTiffDimensions } from "@/lib/geotiffClient";
-import { isWaterHighlightQuery, generateWaterBodyMaskUrl, generatePlaceholderMaskUrl } from "@/lib/hardcodedMask";
+import { extractGeoTiffLocation } from "@/lib/geotiffClient";
 import type { ChatSession, ConversationTurn, ProcessRasterResponse, RasterBBox, UploadedImage } from "@/types/api";
 
 const SIDEBAR_EXPANDED_WIDTH = 288;
@@ -81,13 +80,10 @@ export default function Home() {
   const [cloudPhase, setCloudPhase] = useState<CloudPhase>("idle");
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [revealedTurnId, setRevealedTurnId] = useState<string | null>(null);
-  const [activeRaster, setActiveRaster] = useState<ProcessRasterResponse | null>(null);
   const [activeLayerKey, setActiveLayerKey] = useState<SwitcherKey>("base");
-  // Whether the current turn has real backend-generated layer imagery, vs.
-  // only (or additionally) a hardcoded water mask — these are independent:
-  // a mask can exist even when the backend never ran for this turn.
+  // Whether the current turn has real backend-generated layer imagery —
+  // false when running fully offline/without the backend.
   const [hasBaseLayers, setHasBaseLayers] = useState(false);
-  const [waterMaskAvailable, setWaterMaskAvailable] = useState(false);
   const [focusRect, setFocusRect] = useState<{ left: number; top: number; right: number; bottom: number } | null>(null);
   const isTransitioningRef = useRef(false);
   const activeMapTurnIdRef = useRef<string | null>(null);
@@ -104,10 +100,6 @@ export default function Home() {
   // A turn with no entry here is either text-only or its raster call hasn't
   // resolved yet — either way, the camera never moves for it.
   const turnRasterDataRef = useRef<Map<string, ProcessRasterResponse>>(new Map());
-  // Per-turn hardcoded water-mask URL (see lib/hardcodedMask.ts) — set only
-  // when the turn's query matched the "highlight the water body" pattern and
-  // mask generation succeeded.
-  const turnWaterMaskRef = useRef<Map<string, string>>(new Map());
 
   const { analyze, result, loading, error } = useAnalysis();
 
@@ -168,32 +160,18 @@ export default function Home() {
   // only valid once the camera actually lands there.
   const showRasterForTurn = (turnId: string, raster: ProcessRasterResponse, recomputeDelayMs = 0) => {
     const hasBase = !!raster.layers.base;
-    const maskUrl = turnWaterMaskRef.current.get(turnId);
 
     // Nothing real to show at all — no backend imagery for this turn (e.g.
-    // synthetic/client-only fallback location) and no hardcoded mask either.
-    if (!hasBase && !maskUrl) {
-      setActiveRaster(null);
+    // a synthetic/client-only fallback location with no generated layers).
+    if (!hasBase) {
       setHasBaseLayers(false);
-      setWaterMaskAvailable(false);
       setFocusRect(null);
       return;
     }
 
-    if (hasBase) {
-      rasterOverlay.showRaster(raster.bbox, raster.layers, "base");
-    }
-    setActiveRaster(raster);
-    setHasBaseLayers(hasBase);
-
-    if (maskUrl) {
-      rasterOverlay.showWaterMask(raster.bbox, maskUrl);
-      setActiveLayerKey("water_mask");
-      setWaterMaskAvailable(true);
-    } else {
-      setActiveLayerKey("base");
-      setWaterMaskAvailable(false);
-    }
+    rasterOverlay.showRaster(raster.bbox, raster.layers, "base");
+    setHasBaseLayers(true);
+    setActiveLayerKey("base");
 
     if (recomputeDelayMs > 0) {
       window.setTimeout(() => {
@@ -209,20 +187,11 @@ export default function Home() {
   // Whichever layer tabs actually exist right now, in display order — the
   // same computation LayerSwitcher does internally, needed here too so
   // wheel-cycling (below) can step through exactly the visible tabs.
-  const availableSwitcherTabs = (): SwitcherKey[] => [
-    ...(hasBaseLayers ? SWITCHER_BASE_ORDER : []),
-    ...(waterMaskAvailable ? (["water_mask"] as SwitcherKey[]) : []),
-  ];
+  const availableSwitcherTabs = (): SwitcherKey[] => (hasBaseLayers ? SWITCHER_BASE_ORDER : []);
 
   const handleActiveLayerChange = (key: SwitcherKey) => {
     setActiveLayerKey(key);
-    if (key === "water_mask") {
-      const maskUrl = activeTurnId ? turnWaterMaskRef.current.get(activeTurnId) : undefined;
-      if (activeRaster && maskUrl) rasterOverlay.showWaterMask(activeRaster.bbox, maskUrl);
-    } else {
-      rasterOverlay.hideWaterMask();
-      rasterOverlay.setActiveLayer(key);
-    }
+    rasterOverlay.setActiveLayer(key);
   };
 
   // Scrolling while hovering over the focused raster/mask area cycles
@@ -264,9 +233,7 @@ export default function Home() {
     setRevealedTurnId(null);
     setCloudPhase("idle");
     rasterOverlay.hideRaster();
-    setActiveRaster(null);
     setHasBaseLayers(false);
-    setWaterMaskAvailable(false);
     setFocusRect(null);
   };
 
@@ -302,9 +269,7 @@ export default function Home() {
     } else {
       framedStageRef.current = null;
       rasterOverlay.hideRaster();
-      setActiveRaster(null);
-      setHasBaseLayers(false);
-      setWaterMaskAvailable(false);
+    setHasBaseLayers(false);
       setFocusRect(null);
     }
   };
@@ -442,9 +407,7 @@ export default function Home() {
     // Hide whatever the previous turn was showing for the duration of the
     // flight — it re-appears (for this turn) on arrival.
     rasterOverlay.hideRaster();
-    setActiveRaster(null);
     setHasBaseLayers(false);
-    setWaterMaskAvailable(false);
     setFocusRect(null);
 
     const coverMs = 300;
@@ -535,54 +498,8 @@ export default function Home() {
     }
   };
 
-  // Hardcoded "highlight the water body" demo: draws a fixed translucent
-  // mask over whatever preview we can get for the image (the backend's
-  // generated base layer, the browser's own preview for PNG/JPEG, or a
-  // client-decoded GeoTIFF preview), and stashes the result for
-  // showRasterForTurn to pick up. If no real preview could be obtained at
-  // all — e.g. a real-world GeoTIFF using a compression codec geotiff.js
-  // can't decode, such as JPEG2000, which is common in genuine Sentinel-2
-  // exports — falls back to a placeholder background sized to the file's
-  // real dimensions instead of skipping the mask entirely, so this
-  // hardcoded demo reliably shows *something* whenever the trigger query
-  // matches, regardless of the uploaded file's real format.
-  const maybeGenerateWaterMask = async (turnId: string, query: string, image: UploadedImage, raster: ProcessRasterResponse) => {
-    if (!isWaterHighlightQuery(query)) return;
-
-    // `image.preview`/the backend URL are owned elsewhere (revoked by
-    // QueryInput.removeImage, or not a blob at all); a client-decoded TIFF
-    // preview is ours alone and only needed transiently to draw the mask.
-    let sourceUrl: string | null = null;
-    let ownedSourceUrl: string | null = null;
-    if (raster.layers.base) {
-      sourceUrl = rasterOverlay.resolveUrl(raster.layers.base);
-    } else if (image.preview) {
-      sourceUrl = image.preview;
-    } else {
-      sourceUrl = ownedSourceUrl = await decodeGeoTiffPreview(image.file);
-    }
-
-    try {
-      let maskUrl: string;
-      if (sourceUrl) {
-        maskUrl = await generateWaterBodyMaskUrl(sourceUrl);
-      } else {
-        const dims = await getGeoTiffDimensions(image.file);
-        maskUrl = await generatePlaceholderMaskUrl(dims?.width ?? 512, dims?.height ?? 512);
-      }
-      const previous = turnWaterMaskRef.current.get(turnId);
-      if (previous) URL.revokeObjectURL(previous);
-      turnWaterMaskRef.current.set(turnId, maskUrl);
-    } catch (e) {
-      console.warn("maybeGenerateWaterMask: failed to generate the hardcoded water-mask overlay", e);
-    } finally {
-      if (ownedSourceUrl) URL.revokeObjectURL(ownedSourceUrl);
-    }
-  };
-
-  const fetchRasterAndFly = async (sessionId: string, turnId: string, images: UploadedImage[], query: string) => {
+  const fetchRasterAndFly = async (sessionId: string, turnId: string, images: UploadedImage[]) => {
     const data = await resolveRasterLocation(images[0].file);
-    await maybeGenerateWaterMask(turnId, query, images[0], data);
     applyRasterData(sessionId, turnId, data);
   };
 
@@ -603,9 +520,7 @@ export default function Home() {
     setCloudPhase("idle");
     camera.flyToSimple(IDLE_OCEAN_VIEW, { showMarker: false });
     rasterOverlay.hideRaster();
-    setActiveRaster(null);
     setHasBaseLayers(false);
-    setWaterMaskAvailable(false);
     setFocusRect(null);
   };
 
@@ -699,7 +614,7 @@ export default function Home() {
     analyze(files, turn.query, modalities);
 
     if (draftImages.length > 0) {
-      fetchRasterAndFly(activeSession.id, turn.id, draftImages, turn.query);
+      fetchRasterAndFly(activeSession.id, turn.id, draftImages);
     } else {
       settleOnTextOnlyTurn(turn.id);
     }
@@ -736,7 +651,7 @@ export default function Home() {
     landingElementsRef.current.get(turnId)?.scrollIntoView({ behavior: "smooth", block: "start" });
 
     if (turn.images.length > 0) {
-      fetchRasterAndFly(activeSession.id, turnId, turn.images, turn.query);
+      fetchRasterAndFly(activeSession.id, turnId, turn.images);
     } else {
       settleOnTextOnlyTurn(turnId);
     }
@@ -768,7 +683,7 @@ export default function Home() {
       />
       <CloudTransition phase={cloudPhase} />
       <FocusMask rect={focusRect} />
-      {focusRect && (hasBaseLayers || waterMaskAvailable) && (
+      {focusRect && hasBaseLayers && (
         // Sits above the scrolling feed (z-10) so hovering the sharp raster
         // area captures the wheel event for layer-cycling instead of the
         // page scrolling underneath it.
@@ -931,10 +846,9 @@ export default function Home() {
         onSubmit={handleSubmit}
         loading={loading}
         sidebarWidth={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH}
-        layerSwitcherVisible={hasBaseLayers || waterMaskAvailable}
+        layerSwitcherVisible={hasBaseLayers}
         activeLayer={activeLayerKey}
         hasBaseLayers={hasBaseLayers}
-        waterMaskAvailable={waterMaskAvailable}
         onActiveLayerChange={handleActiveLayerChange}
       />
     </div>

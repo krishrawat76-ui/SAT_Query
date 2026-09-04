@@ -81,8 +81,7 @@ async def analyze(
     router_inst = RuleBasedRouter()
     decision = router_inst.route(query, input_info)
     logger.info(
-        f"[{request_id}] Routed → {decision.task_type.value} "
-        f"(confidence: {decision.confidence}) — {decision.reasoning}"
+        f"[{request_id}] Routed → {decision.task_type.value} — {decision.reasoning}"
     )
 
     # ── 6. Execute pipeline ──

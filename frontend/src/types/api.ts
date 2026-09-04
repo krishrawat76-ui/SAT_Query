@@ -45,7 +45,10 @@ export interface SelectedModel {
 export interface ExecutionTraceData {
     input_validation: ValidationInfo;
     detected_task: string;
-    task_confidence: number;
+    // null when the router had no real confidence to report (the rule-based
+    // router is deterministic keyword matching, not a learned model) —
+    // never a fabricated number.
+    task_confidence: number | null;
     reasoning: string;
     selected_models: SelectedModel[];
     pipeline_steps: PipelineStep[];
@@ -54,7 +57,9 @@ export interface ExecutionTraceData {
 
 export interface AnalysisResponse {
     answer: string;
-    confidence: number;
+    // null when no pipeline step reported a real confidence score (every
+    // stub/no-weights model path today) — never a fabricated placeholder.
+    confidence: number | null;
     evidence: Evidence;
     execution_trace: ExecutionTraceData;
 }

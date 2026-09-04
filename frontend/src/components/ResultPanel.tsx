@@ -52,13 +52,19 @@ export default function ResultPanel({ result, loading, error }: ResultPanelProps
             <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-medium text-slate-100">Result</h2>
                 {result && (
-                    <span
-                        className={`rounded-full border px-3 py-1 text-xs font-medium ${confidenceTone(result.confidence).classes
-                            }`}
-                    >
-                        {Math.round(result.confidence * 100)}% ·{" "}
-                        {confidenceTone(result.confidence).label}
-                    </span>
+                    result.confidence != null ? (
+                        <span
+                            className={`rounded-full border px-3 py-1 text-xs font-medium ${confidenceTone(result.confidence).classes
+                                }`}
+                        >
+                            {Math.round(result.confidence * 100)}% ·{" "}
+                            {confidenceTone(result.confidence).label}
+                        </span>
+                    ) : (
+                        <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-xs font-medium text-slate-500">
+                            Not scored
+                        </span>
+                    )
                 )}
             </div>
 

@@ -80,7 +80,7 @@ class SegmentationModel(BaseModelWrapper):
         answer = synthesize_answer(context["query"], [image_path], "grounding", target=target)
         return {
             "answer": answer,
-            "confidence": 0.3,
+            "confidence": None,
             "evidence_images": [],
             "regions": [],
         }

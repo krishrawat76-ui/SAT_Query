@@ -25,7 +25,7 @@ export default function ExecutionTrace({ trace }: ExecutionTraceProps) {
                         {trace.detected_task.replace(/_/g, " ")}
                     </span>
                     <span className="text-xs text-slate-400">
-                        {Math.round(trace.task_confidence * 100)}% confidence ·{" "}
+                        {trace.task_confidence != null && `${Math.round(trace.task_confidence * 100)}% confidence · `}
                         {trace.total_time_ms.toFixed(0)}ms
                     </span>
                 </div>

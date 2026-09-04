@@ -13,11 +13,6 @@ const LAYER_IDS: Record<LayerKey, string> = {
     spectral_bands: "raster-spectral",
 };
 
-// Hardcoded water-mask demo overlay — kept outside the generic LayerKey
-// plumbing since it's a frontend-only stand-in (see lib/hardcodedMask.ts),
-// not one of the three layers the backend actually returns.
-const WATER_MASK_SOURCE_ID = "raster-water-mask";
-
 function boxCoordinates(
     bbox: RasterBBox
 ): [[number, number], [number, number], [number, number], [number, number]] {
@@ -104,41 +99,11 @@ export function useRasterOverlay() {
     /** Fades all three layers out (sources stay alive, cheap to bring back). */
     const hideRaster = () => {
         const map = mapRef.current;
-        hideWaterMask();
         if (!map || !layersAddedRef.current) return;
         Object.values(LAYER_IDS).forEach((sourceId) => {
             if (!map.getLayer(sourceId)) return;
             map.setPaintProperty(sourceId, "raster-opacity", 0);
         });
-    };
-
-    /** Shows the hardcoded water-mask overlay on top of everything else —
-     * it's a full repaint of the source image plus the mask, so it doesn't
-     * need the other layers' opacities touched at all. */
-    const showWaterMask = (bbox: RasterBBox, url: string) => {
-        const map = mapRef.current;
-        if (!map) return;
-        const coordinates = boxCoordinates(bbox);
-        const existing = map.getSource(WATER_MASK_SOURCE_ID) as maplibregl.ImageSource | undefined;
-        if (existing) {
-            existing.setCoordinates(coordinates);
-            existing.updateImage({ url });
-        } else {
-            map.addSource(WATER_MASK_SOURCE_ID, { type: "image", url, coordinates });
-            map.addLayer({
-                id: WATER_MASK_SOURCE_ID,
-                type: "raster",
-                source: WATER_MASK_SOURCE_ID,
-                paint: { "raster-opacity": 0, "raster-opacity-transition": { duration: 300 } },
-            });
-        }
-        map.setPaintProperty(WATER_MASK_SOURCE_ID, "raster-opacity", 1);
-    };
-
-    const hideWaterMask = () => {
-        const map = mapRef.current;
-        if (!map || !map.getLayer(WATER_MASK_SOURCE_ID)) return;
-        map.setPaintProperty(WATER_MASK_SOURCE_ID, "raster-opacity", 0);
     };
 
     /** Screen-space bounding rect of the bbox's 4 corners, for the focus mask. */
@@ -165,8 +130,6 @@ export function useRasterOverlay() {
         setActiveLayer,
         hideRaster,
         getScreenRect,
-        showWaterMask,
-        hideWaterMask,
         resolveUrl,
     };
 }

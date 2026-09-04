@@ -46,5 +46,5 @@ class OpticalSARFusionModel(BaseModelWrapper):
             "classes": {},
             "evidence_images": [],
             "answer": synthesize_answer(context["query"], context["images"], "fusion"),
-            "confidence": 0.3,
+            "confidence": None,
         }

@@ -31,5 +31,5 @@ class ChangeVQAModel(BaseModelWrapper):
 
         return {
             "answer": synthesize_answer(query, images, "change"),
-            "confidence": 0.3,
+            "confidence": None,
         }

@@ -23,7 +23,6 @@ interface QueryInputProps {
     activeLayer: SwitcherKey;
     onActiveLayerChange: (key: SwitcherKey) => void;
     hasBaseLayers: boolean;
-    waterMaskAvailable: boolean;
 }
 
 const SUGGESTIONS = [
@@ -46,7 +45,6 @@ export default function QueryInput({
     activeLayer,
     onActiveLayerChange,
     hasBaseLayers,
-    waterMaskAvailable,
 }: QueryInputProps) {
     const [focused, setFocused] = useState(false);
     const [attachOpen, setAttachOpen] = useState(false);
@@ -154,7 +152,6 @@ export default function QueryInput({
                         active={activeLayer}
                         onChange={onActiveLayerChange}
                         hasBaseLayers={hasBaseLayers}
-                        waterMaskAvailable={waterMaskAvailable}
                     />
                 )}
 

@@ -34,11 +34,16 @@ class TaskType(Enum):
 
 @dataclass
 class RoutingDecision:
-    """Output of the router — what task, which models, pipeline steps."""
+    """Output of the router — what task, which models, pipeline steps.
+
+    No `confidence` field: this is a deterministic keyword/rule-based
+    classifier, not a learned model — it has no real notion of "how sure"
+    it is about a match, so it doesn't fabricate one. `reasoning` carries
+    the actual justification for the decision instead.
+    """
     task_type: TaskType
     models: list[str]
     pipeline: list[dict]
-    confidence: float
     reasoning: str
 
 
@@ -89,7 +94,7 @@ class RuleBasedRouter:
                 - is_cross_modal (bool, optional)
 
         Returns:
-            RoutingDecision with task_type, models, pipeline, confidence, reasoning.
+            RoutingDecision with task_type, models, pipeline, reasoning.
         """
         q = query.lower().strip()
         n = input_info["num_images"]
@@ -104,7 +109,6 @@ class RuleBasedRouter:
                 pipeline=[
                     {"step": 1, "model": "rs_vlm", "action": "answer_question"},
                 ],
-                confidence=0.7,
                 reasoning="No images attached → conversational response, no image pipeline run.",
             )
 
@@ -117,7 +121,6 @@ class RuleBasedRouter:
                     {"step": 1, "model": "optical_sar_fusion", "action": "fuse_modalities"},
                     {"step": 2, "model": "rs_vlm", "action": "analyze_fused"},
                 ],
-                confidence=0.92,
                 reasoning="Cross-modal input detected (optical + SAR) → Optical-SAR fusion pipeline",
             )
 
@@ -132,7 +135,6 @@ class RuleBasedRouter:
                         {"step": 1, "model": "change_detection", "action": "generate_change_map"},
                         {"step": 2, "model": "change_vqa", "action": "answer_change_question"},
                     ],
-                    confidence=0.90,
                     reasoning="Bi-temporal input + specific change question → Change VQA pipeline",
                 )
             return RoutingDecision(
@@ -142,7 +144,6 @@ class RuleBasedRouter:
                     {"step": 1, "model": "change_detection", "action": "generate_change_map"},
                     {"step": 2, "model": "rs_vlm", "action": "describe_changes"},
                 ],
-                confidence=0.90,
                 reasoning="Bi-temporal input + general query → Change Detection pipeline",
             )
 
@@ -155,7 +156,6 @@ class RuleBasedRouter:
                     {"step": 1, "model": "grounding_dino", "action": "detect_regions"},
                     {"step": 2, "model": "sam", "action": "segment_regions"},
                 ],
-                confidence=0.95,
                 reasoning="Grounding keywords detected in query → Grounding pipeline (DINO + SAM)",
             )
 
@@ -167,7 +167,6 @@ class RuleBasedRouter:
                 pipeline=[
                     {"step": 1, "model": "rs_vlm", "action": "generate_caption"},
                 ],
-                confidence=0.90,
                 reasoning="Caption/description keywords detected → Caption mode via VLM",
             )
 
@@ -178,7 +177,6 @@ class RuleBasedRouter:
             pipeline=[
                 {"step": 1, "model": "rs_vlm", "action": "answer_question"},
             ],
-            confidence=0.85,
             reasoning="General question → Visual Question Answering via VLM",
         )
 

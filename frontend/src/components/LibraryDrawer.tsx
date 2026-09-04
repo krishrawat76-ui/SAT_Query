@@ -93,7 +93,8 @@ export default function LibraryDrawer({ open, onClose, sessions }: LibraryDrawer
                                             {turn.result.execution_trace.detected_task.replace(/_/g, " ")}
                                         </span>
                                         <span className="text-[11px] text-slate-500">
-                                            {Math.round(turn.result.confidence * 100)}% confidence ·{" "}
+                                            {turn.result.confidence != null &&
+                                                `${Math.round(turn.result.confidence * 100)}% confidence · `}
                                             {turn.result.execution_trace.total_time_ms.toFixed(0)}ms
                                         </span>
                                     </div>

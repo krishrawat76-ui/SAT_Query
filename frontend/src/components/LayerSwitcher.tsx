@@ -3,20 +3,15 @@
 import { motion, type PanInfo } from "framer-motion";
 import type { LayerKey } from "@/types/api";
 
-/** "water_mask" is a frontend-only hardcoded demo overlay (see
- * lib/hardcodedMask.ts), never part of the backend-defined LayerKey. */
-export type SwitcherKey = LayerKey | "water_mask";
+export type SwitcherKey = LayerKey;
 
 interface LayerSwitcherProps {
     visible: boolean;
     active: SwitcherKey;
     onChange: (key: SwitcherKey) => void;
     /** Whether the turn has real backend-generated layer imagery — false
-     * when running fully offline/without the backend, even if a hardcoded
-     * mask is still available. */
+     * when running fully offline/without the backend. */
     hasBaseLayers?: boolean;
-    /** Only true when a hardcoded water-mask was generated for this turn. */
-    waterMaskAvailable?: boolean;
 }
 
 const BASE_TABS: { key: SwitcherKey; label: string }[] = [
@@ -24,26 +19,21 @@ const BASE_TABS: { key: SwitcherKey; label: string }[] = [
     { key: "structural_changes", label: "Structural Changes" },
     { key: "spectral_bands", label: "Spectral Bands" },
 ];
-const WATER_MASK_TAB: { key: SwitcherKey; label: string } = { key: "water_mask", label: "Water Mask" };
 
 /**
  * Floating glass tab switcher for the raster layers. Purely a paint-property
- * flip on the map (via `onChange` -> `useRasterOverlay.setActiveLayer` /
- * `showWaterMask`) — never touches the camera, so switching tabs cannot
- * retrigger a flight.
+ * flip on the map (via `onChange` -> `useRasterOverlay.setActiveLayer`) —
+ * never touches the camera, so switching tabs cannot retrigger a flight.
  *
  * Cycling by scroll now lives on the map/mask area itself (see page.tsx's
  * hover-wheel zone over the focused raster rect) — this pill only handles
  * clicks and the swipe gesture, so scrolling over the taskbar itself does
  * nothing (no competing/duplicate scroll behavior between the two).
  */
-export default function LayerSwitcher({ visible, active, onChange, hasBaseLayers, waterMaskAvailable }: LayerSwitcherProps) {
+export default function LayerSwitcher({ visible, active, onChange, hasBaseLayers }: LayerSwitcherProps) {
     if (!visible) return null;
 
-    const tabs = [
-        ...(hasBaseLayers ? BASE_TABS : []),
-        ...(waterMaskAvailable ? [WATER_MASK_TAB] : []),
-    ];
+    const tabs = hasBaseLayers ? BASE_TABS : [];
     if (tabs.length === 0) return null;
 
     const activeIndex = Math.max(0, tabs.findIndex((t) => t.key === active));

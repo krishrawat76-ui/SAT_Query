@@ -55,8 +55,8 @@ class OutputIntegrator:
             if "answer" in out:
                 answer = out["answer"]
 
-            # Confidence — collect for averaging
-            if "confidence" in out:
+            # Confidence — collect only real (non-None) scores for averaging.
+            if out.get("confidence") is not None:
                 confidence_values.append(out["confidence"])
 
             # Evidence images — accumulate
@@ -67,11 +67,10 @@ class OutputIntegrator:
             if "regions" in out:
                 evidence["regions"].extend(out["regions"])
 
-        # Aggregate confidence
-        if confidence_values:
-            confidence = round(sum(confidence_values) / len(confidence_values), 3)
-        else:
-            confidence = 0.5  # Default when no model reports confidence
+        # Aggregate confidence — None (not a fabricated default) when no
+        # step reported a real score, which today is every step, since no
+        # real model is loaded.
+        confidence = round(sum(confidence_values) / len(confidence_values), 3) if confidence_values else None
 
         # If pipeline failed entirely, provide a meaningful error answer
         if all(not r.success for r in step_results):
@@ -79,7 +78,7 @@ class OutputIntegrator:
                 "Sorry, the analysis pipeline encountered an error. "
                 "Please try again or use a different image/query."
             )
-            confidence = 0.0
+            confidence = None
 
         return {
             "answer": answer,

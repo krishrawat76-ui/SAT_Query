@@ -152,8 +152,10 @@ def test_default_vqa_fallback():
     assert result.task_type == TaskType.VQA
 
 
-def test_confidence_ranges():
-    """All routing decisions have confidence in valid range."""
+def test_routing_decisions_have_no_fabricated_confidence():
+    """RoutingDecision carries no `confidence` field — the router is
+    deterministic keyword matching, not a learned model, so it has no real
+    score to report. `reasoning` carries the actual justification instead."""
     router = RuleBasedRouter()
     test_cases = [
         ("What is this?", {"num_images": 1, "modalities": ["optical"]}),
@@ -163,7 +165,8 @@ def test_confidence_ranges():
     ]
     for query, info in test_cases:
         result = router.route(query, info)
-        assert 0.0 <= result.confidence <= 1.0, f"Bad confidence for: '{query}'"
+        assert not hasattr(result, "confidence"), f"Unexpected confidence field for: '{query}'"
+        assert result.reasoning, f"Missing reasoning for: '{query}'"
 
 
 def test_routing_decision_has_pipeline():

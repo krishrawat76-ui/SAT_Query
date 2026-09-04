@@ -1,5 +1,19 @@
 # SAT_Query — Hardcoded & Synthetic Values (Testing/Demo)
 
+> **Update (Phase 4, debug-mode prep):** a cleanup pass removed most of the
+> "Stand-ins for missing real functionality" entries below — every
+> fabricated confidence number, and the entire hardcoded water-mask demo
+> feature — ahead of implementing Debug Mode, so fake-looking data can't be
+> mistaken for real diagnostic signal. Entries below are marked
+> **[REMOVED]** where this happened; the rest of each entry is kept for
+> historical context (why the code once looked the way it did), not because
+> it's still true. Anything not marked REMOVED is still present as
+> described. One notable exception was deliberately **kept**: the synthetic
+> per-file location fallback (both `raster_stub.py::_synthetic_bbox`/
+> `ANCHORS` and `syntheticLocation.ts`) — without it the camera would have
+> nowhere to fly for an unrecognized upload, so it stays until Debug Mode
+> has a real "no location" state to show instead.
+
 > Every place in the codebase — backend and frontend — that fakes, stubs,
 > synthesizes, or fixes a value instead of computing/inferring it for real.
 > Organized by the phase each was introduced in. Companion to `CHANGELOG.md`
@@ -28,13 +42,19 @@ current except where a later phase changed them (noted inline).
 
 ### Stand-ins for missing real functionality
 
-- **`agent/router.py` (`RuleBasedRouter`)** — task classification is pure
-  keyword matching (`GROUNDING_KW`, `CAPTION_KW`, `CHANGE_KW`,
-  `SPECIFIC_QUESTION_PREFIXES` word lists), not a learned intent classifier.
-  Every `RoutingDecision` also carries a **fixed, hand-picked confidence**
-  regardless of how the match was made: grounding `0.95`, caption `0.90`,
-  change-VQA `0.90`, change-detection `0.90`, optical-SAR `0.92`, default
-  VQA `0.85`, text-only VQA `0.7` (this last one added in Phase 3).
+- **[REMOVED] `agent/router.py` (`RuleBasedRouter`)** — task classification
+  is still pure keyword matching (`GROUNDING_KW`, `CAPTION_KW`, `CHANGE_KW`,
+  `SPECIFIC_QUESTION_PREFIXES` word lists — that part is real logic, not
+  fake data, and is unchanged), but `RoutingDecision` used to also carry a
+  **fixed, hand-picked confidence** regardless of how the match was made:
+  grounding `0.95`, caption `0.90`, change-VQA `0.90`, change-detection
+  `0.90`, optical-SAR `0.92`, default VQA `0.85`, text-only VQA `0.7`. The
+  `confidence` field was removed from `RoutingDecision` entirely (Phase 4) —
+  a deterministic rule-based classifier has no real notion of "how sure" it
+  is, so it no longer fabricates one; `reasoning` (a real string, unchanged)
+  carries the actual justification. `ExecutionTrace.task_confidence` (the
+  wire-facing field this fed) is now `Optional[float] = None`, always `None`
+  coming from this router.
 - **`models/grounding.py` (`GroundingModel`)** — always returns **empty**
   `boxes`/`scores`/`labels` (`# No model available — return empty
   detections`). No Grounding DINO inference happens at all; `_extract_target`
@@ -54,11 +74,12 @@ current except where a later phase changed them (noted inline).
   `CLASS_COLORS` are fixed constants for a land-cover legend that's never
   actually populated — `run()` always returns `classes: {}`,
   `evidence_images: []`. No EfficientNet-B0 fusion inference happens.
-- **`models/vqa.py` (`QwenVLMWrapper._estimate_confidence`)** — confidence
-  for a *real* Qwen answer is a **word-count heuristic**, not a model
-  probability: `>50 words → 0.88`, `>30 → 0.82`, `>15 → 0.75`, `>5 → 0.65`,
-  else `0.50` (empty answer → `0.3`). Longer ≠ more correct; this is a
-  placeholder scoring function.
+- **[REMOVED] `models/vqa.py` (`QwenVLMWrapper._estimate_confidence`)** —
+  confidence for a *real* Qwen answer used to be a **word-count heuristic**,
+  not a model probability: `>50 words → 0.88`, `>30 → 0.82`, `>15 → 0.75`,
+  `>5 → 0.65`, else `0.50` (empty answer → `0.3`). Longer ≠ more correct —
+  the method was deleted entirely (Phase 4); every `QwenVLMWrapper` code
+  path (real inference and `_mock_run`) now returns `confidence: None`.
 - **Every stub model pre-Phase-3** returned the literal fixed string
   `"Model output not available"` with `confidence: 0.0` when no real model
   was loaded — replaced in Phase 3 by `synthesize_answer` (see below), but
@@ -91,13 +112,20 @@ history/context since old demo recordings or screenshots may reference them.
 ### Backend — stand-ins for missing real functionality
 
 - **`app/utils/synthesize.py` (`synthesize_answer`)** — every stub model's
-  answer text is now a **template string** built from the real query text
-  and real uploaded filename(s) (an improvement over Phase 1's fixed
-  literal string, but still not a real model output). Every call site pairs
-  it with a **fixed confidence of `0.3`**, regardless of task or input —
-  `models/vqa.py::_mock_run`, `models/vqa.py::_vqa` (text-only path),
+  answer text is a **template string** built from the real query text and
+  real uploaded filename(s), still present unchanged (it's not fake data in
+  the deceptive sense — it explicitly says "This stub environment has no
+  live vision-language model loaded"). **[REMOVED]** every call site used to
+  pair it with a **fixed confidence of `0.3`**, regardless of task or input
+  — `models/vqa.py::_mock_run`, `models/vqa.py::_vqa` (text-only path),
   `models/grounding.py::SegmentationModel`, `models/change_vqa.py`,
-  `models/optical_sar.py`.
+  `models/optical_sar.py` all now return `confidence: None` instead.
+- **[REMOVED] `app/output/integrator.py` (`OutputIntegrator.integrate`)** —
+  found and fixed in the same pass, not originally documented above: a
+  default confidence of `0.5` when no pipeline step reported one (today,
+  every step), and `0.0` on total pipeline failure. Both are now `None` —
+  confidence is only ever a real averaged number when at least one step
+  actually reports one.
 - **`app/output/raster_stub.py` (`ANCHORS`)** — 3 fixed demo coordinates,
   the *exact same* Mumbai/DC/London points Phase 2's now-deleted
   `mapLocations.ts` used — reused here as **fallback anchors** for a
@@ -131,23 +159,23 @@ history/context since old demo recordings or screenshots may reference them.
 
 ### Frontend — stand-ins for missing real functionality
 
-- **`lib/hardcodedMask.ts` (`isWaterHighlightQuery`)** — the *entire*
-  "highlight the water body" feature is a fixed regex trigger:
-  `/\bwater\b/i` AND one of `highlight|show|locate|find|mark|outline|point
-  out`. No real segmentation model decides whether/where water is present —
-  matching the trigger phrase is the whole mechanism.
-- **`lib/hardcodedMask.ts` (`drawWaterEllipse`)** — the "detected" water
-  body is a **fixed translucent blue ellipse** drawn at the same relative
-  position/size on every image, regardless of content: center
-  `(0.52w, 0.58h)`, radii `(0.26w, 0.17h)`, rotation `0.3` radians, fill
-  `rgba(56,130,246,0.55)`, stroke `rgba(96,165,250,0.95)`. It is drawn
-  identically whether the source image shows an ocean, a desert, or a city.
-- **`lib/hardcodedMask.ts` (`generatePlaceholderMaskUrl`)** — when no real
-  preview of the file could even be decoded (e.g. JPEG2000-compressed real
-  Sentinel-2 exports), the mask is drawn over a **flat fixed slate
-  background** (`#1e293b`) instead of any real imagery at all — purely to
-  prove the masking UI renders end-to-end.
-- **`lib/syntheticLocation.ts` (`syntheticRasterFallback`)** — same 3 fixed
+- **[REMOVED] `lib/hardcodedMask.ts`** (entire file deleted, Phase 4) — the
+  *entire* "highlight the water body" feature was a fixed regex trigger
+  (`isWaterHighlightQuery`: `/\bwater\b/i` AND one of
+  `highlight|show|locate|find|mark|outline|point out`) that, when matched,
+  drew a **fixed translucent blue ellipse** (`drawWaterEllipse`: center
+  `(0.52w, 0.58h)`, radii `(0.26w, 0.17h)`, rotation `0.3` radians) at the
+  same relative position on every image regardless of content — identically
+  whether the source showed an ocean, a desert, or a city — with a
+  **fixed flat slate background** (`generatePlaceholderMaskUrl`, `#1e293b`)
+  standing in for the image entirely when no real preview could be decoded.
+  No real segmentation model was ever involved. Removed along with its
+  "Water Mask" `LayerSwitcher` tab, `useRasterOverlay`'s
+  `showWaterMask`/`hideWaterMask`, and `page.tsx`'s
+  `maybeGenerateWaterMask`/`turnWaterMaskRef`/`waterMaskAvailable` state.
+  `geotiffClient.ts`'s `decodeGeoTiffPreview`/`getGeoTiffDimensions` were
+  also deleted as dead code, since they existed only to feed this feature.
+- **(kept)** `lib/syntheticLocation.ts` (`syntheticRasterFallback`) — same 3 fixed
   `ANCHORS` as the backend's `raster_stub.py` (kept in sync by hand, not
   shared code), same filename/size hash-and-jitter scheme, but a **fixed
   `±0.03°` half-extent** (backend's synthetic tier instead derives size from

@@ -53,7 +53,9 @@ class TraceBuilder:
                 "warnings": validation.warnings,
             },
             "detected_task": decision.task_type.value,
-            "task_confidence": decision.confidence,
+            # RuleBasedRouter is deterministic keyword matching, not a
+            # learned model — it has no real confidence score to report.
+            "task_confidence": None,
             "reasoning": decision.reasoning,
             "selected_models": [
                 {"name": model_name, "version": "1.0"}
