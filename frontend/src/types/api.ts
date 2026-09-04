@@ -82,11 +82,7 @@ export interface RasterBBox {
 
 export interface RasterLayers {
     base: string;
-    structural_changes: string;
-    spectral_bands: string;
 }
-
-export type LayerKey = keyof RasterLayers;
 
 export interface ProcessRasterResponse {
     bbox: RasterBBox;

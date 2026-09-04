@@ -227,10 +227,14 @@ class RasterBBox(BaseModel):
 
 
 class RasterLayers(BaseModel):
-    """URLs for the three stub analysis layers, served from /results."""
+    """URL for the map's base raster layer, served from /results.
+
+    Previously also carried `structural_changes`/`spectral_bands` — fixed
+    image transforms with no real change-detection or spectral model behind
+    them, applied identically regardless of the uploaded image's content.
+    Removed as fabricated data; only the real uploaded image remains.
+    """
     base: str
-    structural_changes: str
-    spectral_bands: str
 
 
 class ProcessRasterResponse(BaseModel):

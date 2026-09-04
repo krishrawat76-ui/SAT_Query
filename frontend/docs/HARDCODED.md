@@ -142,14 +142,23 @@ history/context since old demo recordings or screenshots may reference them.
   900`, `padding_factor = 2.5` (~150% padding) are fixed assumptions about
   the map's actual on-screen size, not read from a real viewport. Outer
   clamp `[2, 18]` (was `[14, 16]` before this phase — see `CHANGELOG.md`).
-- **`app/output/raster_stub.py` (`generate_layers`)** — `structural_changes
-  .png` draws **two fixed-position circular blobs** (`cx1,cy1 = 0.3w,0.35h`
-  radius `0.12·min(w,h)`; `cx2,cy2 = 0.65w,0.6h` radius `0.09·min(w,h)`) in a
-  fixed red tint (`(255,60,60)` at `alpha=0.55`) — not a real change-
-  detection model, always the same two blob positions relative to any
-  image's size. `spectral_bands.png` is a fixed, arbitrary channel remap
-  (`R = luminance*1.3`, `G` rolled by `w/3` pixels, `B = 255-luminance`) —
-  cosmetic, not a real NDVI/thermal band computation.
+- **[REMOVED] `app/output/raster_stub.py` (`generate_layers`)** —
+  `structural_changes.png` used to draw **two fixed-position circular
+  blobs** (`cx1,cy1 = 0.3w,0.35h` radius `0.12·min(w,h)`; `cx2,cy2 =
+  0.65w,0.6h` radius `0.09·min(w,h)`) in a fixed red tint (`(255,60,60)` at
+  `alpha=0.55`) — not a real change-detection model, always the same two
+  blob positions relative to any image's size. `spectral_bands.png` was a
+  fixed, arbitrary channel remap (`R = luminance*1.3`, `G` rolled by `w/3`
+  pixels, `B = 255-luminance`) — cosmetic, not a real NDVI/thermal band
+  computation. Both were deleted (Phase 4) — there is no real
+  change-detection or spectral model in this repo that either output stood
+  in for, so this was pure fabrication rather than a placeholder for
+  something that would soon be real. `generate_layers` now saves only the
+  real uploaded image as `base`. `RasterLayers` (backend schema and
+  frontend type) dropped the `structural_changes`/`spectral_bands` fields,
+  and the frontend's `LayerSwitcher` component — which had nothing left to
+  switch between with only one real layer — was deleted along with the
+  wheel-cycle handler and cooldown state in `page.tsx` that drove it.
 - **`app/output/raster_stub.py` (`_epsg_from_geokey_directory`)** — only
   resolves EPSG codes stored directly in the GeoKeyDirectory's 4th field
   (`TIFFTagLocation == 0`); a file storing its CRS key indirectly (via the

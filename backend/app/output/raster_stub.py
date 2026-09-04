@@ -12,7 +12,6 @@ import math
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 from PIL import Image
 from loguru import logger
 
@@ -213,8 +212,17 @@ def zoom_for_bbox(bbox: dict) -> float:
 
 
 def generate_layers(image_path: str, request_id: str) -> dict[str, str]:
-    """Base / structural-changes / spectral-bands PNG stubs, saved under
-    results/{request_id}/ and served via the existing /results static mount."""
+    """Save the real uploaded image as the map's base raster layer.
+
+    Previously this also fabricated "structural_changes" and "spectral_bands"
+    PNGs: a fixed two-blob red overlay and a fixed channel remap, drawn
+    identically on any image regardless of content, with no real
+    change-detection or spectral model behind either one. Removed — there is
+    no real model in this repo that produces either of those outputs (TinyCD
+    and a spectral pipeline were never implemented), so faking them was pure
+    fabrication rather than a placeholder for something that would soon be
+    real. Only the base layer — the actual uploaded image — is generated.
+    """
     out_dir = ensure_results_dir(request_id)
 
     try:
@@ -226,35 +234,6 @@ def generate_layers(image_path: str, request_id: str) -> dict[str, str]:
     base_path = out_dir / "raster_base.png"
     img.save(str(base_path))
 
-    arr = np.array(img)
-    h, w = arr.shape[:2]
-
-    # Structural changes — two deterministic blob regions blended with a red tint.
-    yy, xx = np.mgrid[0:h, 0:w]
-    cx1, cy1 = w * 0.3, h * 0.35
-    cx2, cy2 = w * 0.65, h * 0.6
-    r1, r2 = min(w, h) * 0.12, min(w, h) * 0.09
-    blob_mask = (((xx - cx1) ** 2 + (yy - cy1) ** 2) < r1 ** 2) | (
-        ((xx - cx2) ** 2 + (yy - cy2) ** 2) < r2 ** 2
-    )
-    structural = arr.copy()
-    overlay_color = np.array([255, 60, 60])
-    alpha = 0.55
-    structural[blob_mask] = (arr[blob_mask] * (1 - alpha) + overlay_color * alpha).astype(np.uint8)
-    structural_path = out_dir / "raster_structural_changes.png"
-    Image.fromarray(structural).save(str(structural_path))
-
-    # Spectral bands — false-color channel remap standing in for NIR/thermal.
-    luminance = arr.mean(axis=2)
-    spectral = np.zeros_like(arr)
-    spectral[..., 0] = np.clip(luminance * 1.3, 0, 255)
-    spectral[..., 1] = np.roll(arr[..., 1], shift=w // 3, axis=1)
-    spectral[..., 2] = 255 - np.clip(luminance, 0, 255)
-    spectral_path = out_dir / "raster_spectral_bands.png"
-    Image.fromarray(spectral.astype(np.uint8)).save(str(spectral_path))
-
     return {
         "base": f"/results/{request_id}/raster_base.png",
-        "structural_changes": f"/results/{request_id}/raster_structural_changes.png",
-        "spectral_bands": f"/results/{request_id}/raster_spectral_bands.png",
     }

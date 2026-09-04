@@ -13,7 +13,6 @@ import PinnedQueryCard from "@/components/PinnedQueryCard";
 import { useAnalysis } from "@/hooks/useAnalysis";
 import { useMapCamera, type MapTarget, type FramePadding } from "@/hooks/useMapCamera";
 import { useRasterOverlay } from "@/hooks/useRasterOverlay";
-import { type SwitcherKey } from "@/components/LayerSwitcher";
 import { syntheticRasterFallback } from "@/lib/syntheticLocation";
 import { extractGeoTiffLocation } from "@/lib/geotiffClient";
 import type { ChatSession, ConversationTurn, ProcessRasterResponse, RasterBBox, UploadedImage } from "@/types/api";
@@ -51,8 +50,6 @@ function resultFramePadding(sidebarWidthPx: number): FramePadding {
   return { top: 120, bottom: 180, left: 60 + sidebarWidthPx, right: RESULT_PANEL_CLEARANCE_PX };
 }
 
-const SWITCHER_BASE_ORDER: SwitcherKey[] = ["base", "structural_changes", "spectral_bands"];
-
 function createSession(): ChatSession {
   return {
     id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -80,10 +77,6 @@ export default function Home() {
   const [cloudPhase, setCloudPhase] = useState<CloudPhase>("idle");
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [revealedTurnId, setRevealedTurnId] = useState<string | null>(null);
-  const [activeLayerKey, setActiveLayerKey] = useState<SwitcherKey>("base");
-  // Whether the current turn has real backend-generated layer imagery —
-  // false when running fully offline/without the backend.
-  const [hasBaseLayers, setHasBaseLayers] = useState(false);
   const [focusRect, setFocusRect] = useState<{ left: number; top: number; right: number; bottom: number } | null>(null);
   const isTransitioningRef = useRef(false);
   const activeMapTurnIdRef = useRef<string | null>(null);
@@ -164,14 +157,11 @@ export default function Home() {
     // Nothing real to show at all — no backend imagery for this turn (e.g.
     // a synthetic/client-only fallback location with no generated layers).
     if (!hasBase) {
-      setHasBaseLayers(false);
       setFocusRect(null);
       return;
     }
 
-    rasterOverlay.showRaster(raster.bbox, raster.layers, "base");
-    setHasBaseLayers(true);
-    setActiveLayerKey("base");
+    rasterOverlay.showRaster(raster.bbox, raster.layers);
 
     if (recomputeDelayMs > 0) {
       window.setTimeout(() => {
@@ -182,38 +172,6 @@ export default function Home() {
     } else {
       setFocusRect(rasterOverlay.getScreenRect(raster.bbox));
     }
-  };
-
-  // Whichever layer tabs actually exist right now, in display order — the
-  // same computation LayerSwitcher does internally, needed here too so
-  // wheel-cycling (below) can step through exactly the visible tabs.
-  const availableSwitcherTabs = (): SwitcherKey[] => (hasBaseLayers ? SWITCHER_BASE_ORDER : []);
-
-  const handleActiveLayerChange = (key: SwitcherKey) => {
-    setActiveLayerKey(key);
-    rasterOverlay.setActiveLayer(key);
-  };
-
-  // Scrolling while hovering over the focused raster/mask area cycles
-  // through its available layers — the taskbar itself no longer has its own
-  // wheel handler (see LayerSwitcher.tsx), so this is the only place scroll
-  // drives layer switching now. A trackpad swipe fires many wheel events
-  // (not just one), so without a cooldown a single gesture would race
-  // through several layers at once — this locks to one step per gesture,
-  // then briefly ignores further deltas until the gesture has clearly ended.
-  const wheelCooldownRef = useRef(false);
-  const cycleActiveLayerFromWheel = (deltaY: number) => {
-    if (wheelCooldownRef.current) return;
-    const tabs = availableSwitcherTabs();
-    if (tabs.length === 0) return;
-    const currentIndex = Math.max(0, tabs.indexOf(activeLayerKey));
-    const nextIndex = ((currentIndex + (deltaY > 0 ? 1 : -1)) % tabs.length + tabs.length) % tabs.length;
-    if (tabs[nextIndex] === activeLayerKey) return;
-    handleActiveLayerChange(tabs[nextIndex]);
-    wheelCooldownRef.current = true;
-    window.setTimeout(() => {
-      wheelCooldownRef.current = false;
-    }, 700);
   };
 
   // Settles all the non-camera bookkeeping for a turn that has no location —
@@ -233,7 +191,6 @@ export default function Home() {
     setRevealedTurnId(null);
     setCloudPhase("idle");
     rasterOverlay.hideRaster();
-    setHasBaseLayers(false);
     setFocusRect(null);
   };
 
@@ -269,7 +226,6 @@ export default function Home() {
     } else {
       framedStageRef.current = null;
       rasterOverlay.hideRaster();
-    setHasBaseLayers(false);
       setFocusRect(null);
     }
   };
@@ -407,7 +363,6 @@ export default function Home() {
     // Hide whatever the previous turn was showing for the duration of the
     // flight — it re-appears (for this turn) on arrival.
     rasterOverlay.hideRaster();
-    setHasBaseLayers(false);
     setFocusRect(null);
 
     const coverMs = 300;
@@ -490,7 +445,7 @@ export default function Home() {
           bbox: real.bbox,
           center: real.center,
           zoom: real.zoom,
-          layers: { base: "", structural_changes: "", spectral_bands: "" },
+          layers: { base: "" },
           source: "geotiff-tags",
         };
       }
@@ -520,7 +475,6 @@ export default function Home() {
     setCloudPhase("idle");
     camera.flyToSimple(IDLE_OCEAN_VIEW, { showMarker: false });
     rasterOverlay.hideRaster();
-    setHasBaseLayers(false);
     setFocusRect(null);
   };
 
@@ -683,21 +637,6 @@ export default function Home() {
       />
       <CloudTransition phase={cloudPhase} />
       <FocusMask rect={focusRect} />
-      {focusRect && hasBaseLayers && (
-        // Sits above the scrolling feed (z-10) so hovering the sharp raster
-        // area captures the wheel event for layer-cycling instead of the
-        // page scrolling underneath it.
-        <div
-          className="fixed z-20"
-          style={{
-            left: focusRect.left,
-            top: focusRect.top,
-            width: focusRect.right - focusRect.left,
-            height: focusRect.bottom - focusRect.top,
-          }}
-          onWheel={(e) => cycleActiveLayerFromWheel(e.deltaY)}
-        />
-      )}
       <PinnedQueryCard
         turn={activeSession?.turns.find((t) => t.id === activeTurnId) ?? null}
         rect={focusRect}
@@ -846,10 +785,6 @@ export default function Home() {
         onSubmit={handleSubmit}
         loading={loading}
         sidebarWidth={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_EXPANDED_WIDTH}
-        layerSwitcherVisible={hasBaseLayers}
-        activeLayer={activeLayerKey}
-        hasBaseLayers={hasBaseLayers}
-        onActiveLayerChange={handleActiveLayerChange}
       />
     </div>
   );
