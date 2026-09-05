@@ -62,8 +62,11 @@ class UnavailableModelExecutor:
                 "model": model_name,
                 "action": action,
                 "query": query_for_model,
+                # Basenames only. `image_paths` used to ride along here and,
+                # under ?debug=true, TraceBuilder snapshotted it into
+                # payload_snapshot — putting the absolute upload path
+                # (/var/folders/.../satquery_xxxx/a.png) in the response body.
                 "images": image_names,
-                "image_paths": image_paths,
                 "task_id": task_id,
                 "shiven_task": shiven_task,
                 "message": (

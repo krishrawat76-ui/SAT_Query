@@ -15,6 +15,27 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_node_state(tmp_path, monkeypatch):
+    """Keep every test off the developer's real .satquery/device.json.
+
+    HybridPipelineExecutor consults the live node registry before falling
+    back to local execution, so a machine with real LAN pairing state left
+    over from manual testing would silently route test requests to a real
+    Model Host over the network (and time out) instead of exercising the
+    mocked local registry the test actually set up.
+    """
+    monkeypatch.setattr(
+        "app.node.config_store.satquery_dir",
+        lambda: tmp_path / ".satquery",
+    )
+    import app.node.registry as reg_mod
+
+    reg_mod._registry = None
+    yield
+    reg_mod._registry = None
+
+
 @pytest.fixture
 def tiny_png(tmp_path):
     """A real 32x32 PNG on disk — enough for InputValidator to open it."""
@@ -111,3 +132,31 @@ def client(monkeypatch):
 
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def rule_router(monkeypatch):
+    """Pin the in-repo RuleBasedRouter for tests that assert its own contract.
+
+    USE_SHIVEN_ROUTER defaults to true, so tests asserting rule_id values like
+    "grounding_keywords" or "text_only", or that the LLM-planner fields are
+    null, were passing only when Ollama happened to be unreachable AND the
+    Shiven import happened to fail. They describe the rule router's behaviour,
+    so they should select it rather than depend on the ambient environment.
+    """
+    from app.utils.config import settings
+
+    monkeypatch.setattr(settings, "USE_SHIVEN_ROUTER", False)
+
+
+@pytest.fixture
+def real_models(monkeypatch):
+    """Run the actual model wrappers instead of UnavailableModelExecutor.
+
+    SKIP_MODEL_INFERENCE defaults to true, which bypasses ModelRegistry
+    entirely — so a test that monkeypatches registry.get to inject a fake model
+    would never see it called.
+    """
+    from app.utils.config import settings
+
+    monkeypatch.setattr(settings, "SKIP_MODEL_INFERENCE", False)

@@ -136,8 +136,12 @@ class InputValidator:
 
             try:
                 size_bytes = p.stat().st_size
-            except OSError as e:
-                add_error("FILE_UNREADABLE", f"{img_label}: Cannot access file — {e}", [i])
+            except OSError:
+                # The raw OSError text embeds the absolute temp path, disclosing
+                # the temp-dir scheme, the OS, and the account the server runs
+                # as. Log it, don't echo it.
+                logger.warning(f"{img_label}: stat() failed for {p}", exc_info=True)
+                add_error("FILE_UNREADABLE", f"{img_label}: Upload could not be read from storage.", [i])
                 continue
 
             if size_bytes == 0:
@@ -262,10 +266,16 @@ class InputValidator:
                         "georef_source": georef.get("source"),
                         "nodata_ratio_sample": nodata_ratio,
                     })
-            except Exception as e:
+            except Exception:
+                # PIL's raw message is
+                # "cannot identify image file '/var/folders/.../satquery_xxx/f.png'"
+                # — the same temp-path disclosure as the OSError branch above.
+                # Log it, don't echo it.
+                logger.warning(f"{img_label}: PIL could not open {path}", exc_info=True)
                 add_error(
                     "CORRUPT_OR_UNREADABLE",
-                    f"{img_label}: Cannot read image — {e}",
+                    f"{img_label}: Not a readable image. Accepted formats: "
+                    f"{', '.join(sorted(self.VALID_EXTENSIONS))}.",
                     [i],
                 )
 
@@ -319,7 +329,15 @@ class InputValidator:
                 unsupported=True,
             )
 
-        if requirements.needs_temporal_pair and n < 2 and status != ValidationStatus.UNSUPPORTED:
+        # n == 0 is left to the router/preflight, which coerce a zero-image
+        # request to the conversational path rather than rejecting it — only
+        # a *partially* supplied pair (exactly one image) is a real mismatch
+        # here.
+        if (
+            requirements.needs_temporal_pair
+            and 0 < n < 2
+            and status != ValidationStatus.UNSUPPORTED
+        ):
             add_error(
                 "MISSING_TEMPORAL_INPUT",
                 "This query requires two temporally distinct images of the same area, "

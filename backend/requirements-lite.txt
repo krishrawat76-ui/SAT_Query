@@ -6,8 +6,11 @@
 # Direct dependencies are pinned. Transitive deps resolve under these pins
 # so Windows pip stays quiet and does not fight uvicorn/fastapi sub-deps.
 # Install only into the project venv created by scripts/start-satquery.*
+#
+# fastapi pinned to 0.115.3, not 0.115.0 — 0.115.3+ pulls starlette>=0.40.0,
+# which caps multipart part size (CVE-2024-47874).
 
-fastapi==0.115.0
+fastapi==0.115.3
 uvicorn[standard]==0.30.0
 python-multipart==0.0.12
 pydantic==2.9.0

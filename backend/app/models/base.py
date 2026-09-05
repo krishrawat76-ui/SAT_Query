@@ -8,6 +8,8 @@ This ensures the PipelineExecutor can call any model uniformly.
 from abc import ABC, abstractmethod
 from typing import Optional
 
+from app.agent.exceptions import ArityMismatchError
+
 
 class BaseModelWrapper(ABC):
     """
@@ -62,3 +64,41 @@ class BaseModelWrapper(ABC):
                 - type (str): Output type identifier
         """
         pass
+
+    # ── Context accessors ──
+    # app/agent/preflight.py is the primary gate and rejects an impossible plan
+    # before any model loads. These are the defensive second layer, so a direct
+    # caller or a future router cannot reintroduce the crash: every wrapper used
+    # to index context["images"] positionally, and every one of those raised
+    # IndexError on a short list.
+
+    @staticmethod
+    def require_images(
+        context: dict, count: int, *, model: str, action: str
+    ) -> list[str]:
+        """Positional image access that fails as a domain error, not IndexError."""
+        images = context.get("images") or []
+        if len(images) < count:
+            plural = "s" if count != 1 else ""
+            raise ArityMismatchError(
+                f"'{model}.{action}' needs {count} image{plural}, but "
+                f"{len(images)} were provided.",
+                details={
+                    "model": model,
+                    "action": action,
+                    "required_images": count,
+                    "received_images": len(images),
+                },
+            )
+        return images
+
+    @staticmethod
+    def prior_step(context: dict, step: int) -> dict:
+        """Upstream step output as a dict; {} when missing or not a dict.
+
+        SegmentationModel did context["intermediate"]["step_1"] (KeyError when
+        step 1 never ran) and then .get() on the result (AttributeError when an
+        upstream wrapper returned a str instead of a dict).
+        """
+        value = (context.get("intermediate") or {}).get(f"step_{step}")
+        return value if isinstance(value, dict) else {}

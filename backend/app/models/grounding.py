@@ -23,7 +23,10 @@ class GroundingModel(BaseModelWrapper):
     """
 
     def run(self, action: str, context: dict) -> dict:
-        image_path = context["images"][0]
+        # Was context["images"][0]: a grounding plan built from query text alone
+        # ("highlight the water body") reached here with zero images attached
+        # and raised IndexError.
+        self.require_images(context, 1, model="grounding_dino", action=action)
         query = context["query"]
         target = self._extract_target(query)
 
@@ -62,25 +65,51 @@ class SegmentationModel(BaseModelWrapper):
     """
 
     def run(self, action: str, context: dict) -> dict:
-        image_path = context["images"][0]
-        detections = context["intermediate"]["step_1"]
+        images = self.require_images(context, 1, model="sam", action=action)
+        image_path = images[0]
+        # Was context["intermediate"]["step_1"] followed by .get(): KeyError when
+        # step 1 never ran, AttributeError when it returned a str instead of a
+        # dict. prior_step() degrades to {} for both.
+        detections = self.prior_step(context, 1)
         request_id = context.get("request_id", "demo")
 
         target = detections.get("target", "object")
-        boxes = detections.get("boxes", [])
-        scores = detections.get("scores", [])
+        boxes = detections.get("boxes") or []
+        scores = detections.get("scores") or []
 
         logger.info(f"[STUB] SAM segmenting {len(boxes)} regions")
 
-        # Generate evidence overlay using bbox helper
-        overlay_url = overlay_bboxes(
-            image_path, boxes, [target] * len(boxes), scores, request_id
-        )
+        # The return value used to be assigned and then dropped, so an overlay
+        # that failed to render vanished twice over — silently inside
+        # overlay_bboxes, then again here. Now it is reported as real evidence,
+        # or its absence is recorded.
+        # Only when there is something to draw. With zero detections the
+        # overlay is a byte-for-byte copy of the input, and offering that as
+        # "detected regions" is fabricated evidence — the stub detector returns
+        # no boxes, so this is the normal path today.
+        evidence_images = []
+        if boxes:
+            overlay_url = overlay_bboxes(
+                image_path, boxes, [target] * len(boxes), scores, request_id
+            )
+            if overlay_url:
+                evidence_images.append({
+                    "type": "grounding_overlay",
+                    "url": overlay_url,
+                    "caption": f"Detected regions for '{target}'",
+                })
+            else:
+                logger.warning(
+                    f"SAM had {len(boxes)} boxes but the overlay could not be "
+                    "rendered; reporting no evidence rather than a blank URL."
+                )
 
-        answer = synthesize_answer(context["query"], [image_path], "grounding", target=target)
+        answer = synthesize_answer(
+            context["query"], [image_path], "grounding", target=target
+        )
         return {
             "answer": answer,
             "confidence": None,
-            "evidence_images": [],
+            "evidence_images": evidence_images,
             "regions": [],
         }

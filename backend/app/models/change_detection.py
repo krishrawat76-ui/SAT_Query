@@ -24,9 +24,12 @@ class ChangeDetectionModel(BaseModelWrapper):
     """
 
     def run(self, action: str, context: dict) -> dict:
-        img1_path = context["images"][0]
-        img2_path = context["images"][1]
-        request_id = context.get("request_id", "demo")
+        # Was context["images"][0] / [1]: a change-detection plan built from
+        # query text alone reached here with one image and raised IndexError,
+        # which PipelineExecutor swallowed into an HTTP 200.
+        # Called for the arity check, not the paths: this stub returns empty
+        # literals, and a real TinyCD implementation would read images[0]/[1].
+        self.require_images(context, 2, model="change_detection", action=action)
 
         logger.info("[STUB] Change detection running on image pair")
 

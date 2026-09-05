@@ -165,12 +165,20 @@ def _load_shiven_classes() -> tuple[Any, Any, Any]:
 
 
 def _image_refs(image_paths: list[str], modalities: list[str]) -> list[dict]:
+    """Client-facing image references for the execution trace.
+
+    Deliberately carries no absolute path. These refs are serialized into
+    router_metadata.intent_decomposition and returned in every successful 200,
+    where an entry like
+    "/var/folders/f2/5jwpgqns.../T/satquery_jtm636g3/scene.png" disclosed the
+    temp-dir scheme, the OS, and the account the server runs as. Nothing reads
+    the field — `filename` beside it is what downstream code and the UI use.
+    """
     refs = []
     for i, path in enumerate(image_paths):
         refs.append({
             "index": i,
             "filename": Path(path).name,
-            "path": path,
             "modality": modalities[i] if i < len(modalities) else None,
         })
     return refs

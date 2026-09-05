@@ -5,7 +5,10 @@ Handles the RTX 4060 (8GB) constraint by loading ONE major model at a time.
 Strategy: Load → Infer → (auto-unload if needed) → Load next.
 """
 
+import contextlib
 import gc
+import threading
+
 from loguru import logger
 
 
@@ -22,8 +25,17 @@ class ModelRegistry:
     """
 
     def __init__(self):
-        self._models: dict = {}      # name → loaded model instance
+        self._models: dict = {}      # name → loaded model instance (LRU order)
         self._configs: dict = {}     # name → {"loader": fn, "vram_gb": float}
+        # get()/unload()/_ensure_vram all mutate _models. With the pipeline now
+        # running off the event loop, two threads can reach _load() for the same
+        # name and each construct a 5.5 GB model into an 8 GB card. Nothing
+        # serialized that before.
+        self._lock = threading.RLock()
+        # Models currently mid-inference. _ensure_vram must not evict these —
+        # it previously could unload a model another in-flight request was
+        # actively running on.
+        self._in_use: set[str] = set()
 
     def register(self, name: str, loader_fn, vram_gb: float = 0.0):
         """
@@ -34,7 +46,8 @@ class ModelRegistry:
             loader_fn: Callable that returns a model instance when called.
             vram_gb: Estimated VRAM usage in GB.
         """
-        self._configs[name] = {"loader": loader_fn, "vram_gb": vram_gb}
+        with self._lock:
+            self._configs[name] = {"loader": loader_fn, "vram_gb": vram_gb}
         logger.debug(f"Registered model: {name} (~{vram_gb} GB)")
 
     def get(self, name: str):
@@ -52,16 +65,36 @@ class ModelRegistry:
         Raises:
             ValueError: If model name is not registered.
         """
-        if name not in self._configs:
-            raise ValueError(
-                f"Unknown model: '{name}'. "
-                f"Registered models: {list(self._configs.keys())}"
-            )
+        with self._lock:
+            if name not in self._configs:
+                raise ValueError(
+                    f"Unknown model: '{name}'. "
+                    f"Registered models: {list(self._configs.keys())}"
+                )
 
-        if name not in self._models:
-            self._load(name)
+            if name not in self._models:
+                self._load(name)
 
-        return self._models[name]
+            # Move to the end so _ensure_vram evicts genuinely cold models. It
+            # previously took candidates[0] — dict INSERTION order, not recency
+            # — so the most recently used model could be the first evicted.
+            self._models[name] = self._models.pop(name)
+            return self._models[name]
+
+    @contextlib.contextmanager
+    def pin(self, name: str):
+        """Mark a model in-use for the duration of a block.
+
+        _ensure_vram skips pinned models, so an eviction triggered by a second
+        request cannot unload weights the first one is mid-inference on.
+        """
+        with self._lock:
+            self._in_use.add(name)
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._in_use.discard(name)
 
     def _load(self, name: str):
         """Load a model, ensuring VRAM is available first."""
@@ -99,12 +132,18 @@ class ModelRegistry:
             free = torch.cuda.mem_get_info()[0] / 1e9
 
             while free < needed_gb and self._models:
-                # Unload the oldest loaded model (FIFO)
-                candidates = [k for k in self._models if k != exclude]
+                # Least-recently-used first: get() moves each model to the end
+                # of _models, so index 0 is now genuinely the coldest rather
+                # than merely the first ever registered. Pinned models are never
+                # candidates — evicting one would pull weights out from under an
+                # in-flight inference.
+                candidates = [
+                    k for k in self._models
+                    if k != exclude and k not in self._in_use
+                ]
                 if not candidates:
                     break
-                oldest = candidates[0]
-                self.unload(oldest)
+                self.unload(candidates[0])
                 free = torch.cuda.mem_get_info()[0] / 1e9
 
         except ImportError:
@@ -123,36 +162,45 @@ class ModelRegistry:
 
     def unload(self, name: str):
         """Unload a model and free its resources."""
-        if name in self._models:
+        with self._lock:
+            if name not in self._models:
+                return
             del self._models[name]
-            gc.collect()
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
-            logger.info(f"Unloaded model: {name}")
+
+        # gc + empty_cache outside the lock: both can take real time, and
+        # neither touches registry state.
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        logger.info(f"Unloaded model: {name}")
 
     def unload_all(self):
         """Unload all loaded models."""
-        for name in list(self._models.keys()):
+        with self._lock:
+            names = list(self._models.keys())
+        for name in names:
             self.unload(name)
 
     def list_loaded(self) -> list[str]:
         """Return names of currently loaded models."""
-        return list(self._models.keys())
+        with self._lock:
+            return list(self._models.keys())
 
     def list_all(self) -> list[dict]:
         """Return info about all registered models."""
-        return [
-            {
-                "name": name,
-                "loaded": name in self._models,
-                "vram_gb": config["vram_gb"],
-            }
-            for name, config in self._configs.items()
-        ]
+        with self._lock:
+            return [
+                {
+                    "name": name,
+                    "loaded": name in self._models,
+                    "vram_gb": config["vram_gb"],
+                }
+                for name, config in self._configs.items()
+            ]
 
     def describe(self, name: str) -> dict:
         """Registry facts about a model, whether or not it is registered.
@@ -167,10 +215,11 @@ class ModelRegistry:
         literals, so a rename in main.py surfaces here rather than as an
         unexplained step failure.
         """
-        config = self._configs.get(name)
-        return {
-            "registered": config is not None,
-            "loaded": name in self._models,
-            "vram_gb": config["vram_gb"] if config else None,
-            "version": getattr(self._models.get(name), "version", None),
-        }
+        with self._lock:
+            config = self._configs.get(name)
+            return {
+                "registered": config is not None,
+                "loaded": name in self._models,
+                "vram_gb": config["vram_gb"] if config else None,
+                "version": getattr(self._models.get(name), "version", None),
+            }
