@@ -7,11 +7,14 @@ ModelRegistry, calls model.run(action, context), and collects results.
 Intermediate outputs from earlier steps are passed forward via context["intermediate"].
 """
 
+import contextlib
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from loguru import logger
+
+from app.agent.exceptions import PipelineInputError
 
 
 @dataclass
@@ -130,7 +133,15 @@ class PipelineExecutor:
                     model.last_telemetry = None
 
                 infer_start = time.perf_counter()
-                output = model.run(action=action, context=context)
+                # Pinned for the duration: _ensure_vram could otherwise evict
+                # these weights to make room for a concurrent request's model,
+                # mid-inference. Harmless while the lane is serialized, and the
+                # correctness guarantee if it is ever widened.
+                # getattr, not a hard call: the registry is duck-typed and test
+                # doubles do not implement pin().
+                pin = getattr(self.registry, "pin", None)
+                with pin(model_name) if pin else contextlib.nullcontext():
+                    output = model.run(action=action, context=context)
                 infer_ms = (time.perf_counter() - infer_start) * 1000
 
                 # Store output for downstream steps
@@ -154,6 +165,14 @@ class PipelineExecutor:
                     f"[{request_id}] Step {step_num} complete "
                     f"({load_ms + infer_ms:.0f}ms — load {load_ms:.0f}ms, infer {infer_ms:.0f}ms)"
                 )
+
+            except PipelineInputError:
+                # Deliberately NOT swallowed. These say the request cannot drive
+                # this pipeline at all — the caller must see a 422, not a step
+                # marked "error" inside an HTTP 200. Swallowing them here is
+                # exactly how "what changed?" with one image used to return 200
+                # with answer "Model not available".
+                raise
 
             except Exception as e:
                 error_msg = str(e)

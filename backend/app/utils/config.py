@@ -70,9 +70,38 @@ class Settings:
     # ── GPU ──
     MAX_VRAM_GB: float = float(os.environ.get("MAX_VRAM_GB", "8.0"))
 
+    # ── Inference lane ──
+    # Inference runs on a single-worker executor, not the event loop and not a
+    # general threadpool: the registry holds one major model at a time for an
+    # 8 GB card, so concurrent inferences would thrash VRAM. The queue bounds
+    # how many requests may wait, so overload sheds as 503 instead of piling up.
+    INFERENCE_TIMEOUT_S: float = float(os.environ.get("INFERENCE_TIMEOUT_S", "180"))
+    INFERENCE_QUEUE_DEPTH: int = int(os.environ.get("INFERENCE_QUEUE_DEPTH", "4"))
+    INFERENCE_QUEUE_WAIT_S: float = float(
+        os.environ.get("INFERENCE_QUEUE_WAIT_S", "30")
+    )
+
     # ── Uploads ──
-    MAX_UPLOAD_SIZE_MB: int = 50
+    MAX_UPLOAD_SIZE_MB: int = 50          # per image
+    # Mirrors InputValidator's own 1-or-2 image rule. Checked in the route
+    # BEFORE the write loop — the validator's copy runs after every file has
+    # already been streamed to disk.
+    MAX_IMAGES_PER_REQUEST: int = 2
+    # Whole-body ceiling: two images at the per-file cap plus multipart overhead.
+    MAX_REQUEST_SIZE_MB: int = 110
     TEMP_DIR: str = _default_temp_dir()
+
+    # ── Request field limits ──
+    # The frontend's own type is `Modality = "optical" | "sar"`
+    # (frontend/src/types/api.ts), so an allowlist costs it nothing.
+    ALLOWED_MODALITIES: frozenset = frozenset({"optical", "sar"})
+    MAX_MODALITY_ITEMS: int = 2
+    MAX_DATE_ITEMS: int = 2
+    # Kept in step with InputValidator.validate_query's own 2000-char check;
+    # declaring it on the Form field rejects at parse time instead of after
+    # the upload has already been written to disk.
+    MAX_QUERY_CHARS: int = 2000
+    MAX_METADATA_FIELD_CHARS: int = 512
 
     # ── Debug ──
     # Default for the execution trace's per-step payload snapshots when a

@@ -139,6 +139,8 @@ class StageTimings(BaseModel):
     upload_ms: float = 0.0
     validation_ms: float = 0.0
     routing_ms: float = 0.0
+    # Spatial/arity/modality preconditions, checked before any model loads.
+    preflight_ms: float = 0.0
     execution_ms: float = 0.0
     integration_ms: float = 0.0
     # Sum of PipelineStep.time_ms — what total_time_ms used to (wrongly) be.
@@ -161,6 +163,21 @@ class ImageComposition(BaseModel):
     date: Optional[str] = None
 
 
+class SpatialCheck(BaseModel):
+    """Ground-overlap facts from preflight, for a multi-image request.
+
+    `enforced` is the field that matters: it is False when one or both rasters
+    carry no GeoTIFF georeferencing, in which case `extract_bbox` synthesized
+    their footprints from a filename hash and `bbox_iou` describes invented
+    boxes rather than real ground. Only an enforced check can reject.
+    """
+    enforced: bool = False
+    bbox_iou: Optional[float] = None
+    image_1_source: Optional[str] = None
+    image_2_source: Optional[str] = None
+    gsd_ratio: Optional[float] = None
+
+
 class InputComposition(BaseModel):
     """What actually arrived, in more detail than ValidationInfo."""
     images: list[ImageComposition] = []
@@ -168,6 +185,8 @@ class InputComposition(BaseModel):
     total_size_mb: float = 0.0
     is_temporal: bool = False
     is_cross_modal: bool = False
+    # None for a single-image request — nothing to overlap.
+    spatial: Optional[SpatialCheck] = None
     # The backend never reads GeoTIFF CRS today (EPSG is parsed and then
     # discarded client-side in geotiffClient.ts). Null until that moves
     # server-side — never assumed to be EPSG:4326.

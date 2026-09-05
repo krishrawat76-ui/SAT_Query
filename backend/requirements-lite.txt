@@ -1,6 +1,8 @@
 # Lightweight deps for SatQuery local demo
 # (Shiven planner + FastAPI + Debug Mode — no GPU / torch stack required)
-fastapi==0.115.0
+# See requirements.txt — 0.115.3+ is required for the starlette>=0.40.0
+# multipart part-size cap (CVE-2024-47874).
+fastapi>=0.115.3,<0.116
 uvicorn[standard]==0.30.0
 python-multipart==0.0.12
 pydantic==2.9.0

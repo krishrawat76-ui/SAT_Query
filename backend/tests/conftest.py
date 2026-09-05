@@ -102,3 +102,31 @@ def client():
 
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def rule_router(monkeypatch):
+    """Pin the in-repo RuleBasedRouter for tests that assert its own contract.
+
+    USE_SHIVEN_ROUTER defaults to true, so tests asserting rule_id values like
+    "grounding_keywords" or "text_only", or that the LLM-planner fields are
+    null, were passing only when Ollama happened to be unreachable AND the
+    Shiven import happened to fail. They describe the rule router's behaviour,
+    so they should select it rather than depend on the ambient environment.
+    """
+    from app.utils.config import settings
+
+    monkeypatch.setattr(settings, "USE_SHIVEN_ROUTER", False)
+
+
+@pytest.fixture
+def real_models(monkeypatch):
+    """Run the actual model wrappers instead of UnavailableModelExecutor.
+
+    SKIP_MODEL_INFERENCE defaults to true, which bypasses ModelRegistry
+    entirely — so a test that monkeypatches registry.get to inject a fake model
+    would never see it called.
+    """
+    from app.utils.config import settings
+
+    monkeypatch.setattr(settings, "SKIP_MODEL_INFERENCE", False)

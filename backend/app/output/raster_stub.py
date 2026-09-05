@@ -16,6 +16,7 @@ from PIL import Image
 from loguru import logger
 
 from app.output.evidence import ensure_results_dir
+from app.utils.raster_io import load_rgb
 
 try:
     from pyproj import Transformer
@@ -24,6 +25,10 @@ except ImportError:
     _HAS_PYPROJ = False
 
 KM_PER_DEG_LAT = 111.32
+
+# Returned when a bbox is unusable (missing, non-numeric, or non-finite) rather
+# than guessing from it. Mid-range, so the map frames *something* sensible.
+DEFAULT_ZOOM = 12.0
 
 ANCHORS = [
     (72.8777, 19.076),    # Mumbai
@@ -143,6 +148,15 @@ def _geotiff_bbox(img: Image.Image, width: int, height: int) -> Optional[dict]:
         # Tiepoint layout: (pixel_x, pixel_y, pixel_z, world_x, world_y, world_z, ...)
         origin_x, origin_y = float(tiepoint[3]), float(tiepoint[4])
 
+        # A NaN/inf tag value propagates through the arithmetic below and out
+        # into the response, where it fails Starlette's allow_nan=False render
+        # as a 500. Fall back to synthetic instead.
+        if not all(
+            math.isfinite(v) for v in (scale_x, scale_y, origin_x, origin_y)
+        ):
+            logger.warning("GeoTIFF tags carry non-finite values — using synthetic bbox.")
+            return None
+
         west = origin_x
         north = origin_y
         east = origin_x + scale_x * width
@@ -202,12 +216,27 @@ def zoom_for_bbox(bbox: dict) -> float:
     against a live map. [2, 18] are outer safety bounds only, not a target
     range — a small synthetic chip naturally lands around 14-16, while a
     real satellite tile (tens to ~100km across) correctly lands much lower
-    (zoomed further out) so the whole extent still fits the viewport."""
-    lng_span = max(bbox["east"] - bbox["west"], 1e-6)
+    (zoomed further out) so the whole extent still fits the viewport.
+
+    Non-finite spans reach here from _reproject_to_wgs84: pyproj returns inf
+    for coordinates outside a projected CRS's valid domain, which a malformed
+    GeoTIFF tiepoint produces routinely. An inf span drove log2(0) →
+    ValueError → 500, and a NaN span slipped through min/max to return 2.0 —
+    a plausible-looking wrong answer, which is worse than an honest default."""
+    try:
+        span = abs(float(bbox["east"]) - float(bbox["west"]))
+    except (KeyError, TypeError, ValueError):
+        return DEFAULT_ZOOM
+    if not math.isfinite(span):
+        return DEFAULT_ZOOM
+
+    lng_span = min(max(span, 1e-6), 360.0)
     assumed_viewport_px = 900.0
     padding_factor = 2.5
     target_px = assumed_viewport_px / padding_factor
     raw_zoom = math.log2((360.0 * target_px) / (lng_span * 512.0))
+    if not math.isfinite(raw_zoom):
+        return DEFAULT_ZOOM
     return float(min(18.0, max(2.0, raw_zoom)))
 
 
@@ -232,7 +261,11 @@ def generate_layers(image_path: str, request_id: str) -> dict[str, Optional[str]
     out_dir = ensure_results_dir(request_id)
 
     try:
-        img = Image.open(image_path).convert("RGB")
+        # load_rgb, not .convert("RGB"): a 16-bit or float32 GeoTIFF — the
+        # normal case for real satellite products — was clipped to a handful of
+        # surviving levels, so the map's base layer showed a near-black or
+        # near-white tile with no indication anything had been lost.
+        img, _report = load_rgb(image_path, label="Raster base layer")
     except Exception as e:
         logger.error(f"Failed to open {image_path} for layer generation: {e}")
         img = Image.new("RGB", (512, 512), (40, 40, 40))

@@ -36,6 +36,28 @@ MAX_NODES = 20_000
 ARRAY_STATS_MAX_SIZE = 4_000_000
 
 
+def json_safe(obj: Any) -> Any:
+    """Null every non-finite float in a response tree.
+
+    Starlette's JSONResponse renders with ``allow_nan=False``, so a single NaN
+    or Infinity anywhere raises ``ValueError: Out of range float values are not
+    JSON compliant`` mid-render and 500s an otherwise-successful request. The
+    integrator and the debug sanitizer each guard their own known source
+    (confidence, payload snapshots); this is the whole-response backstop that
+    also covers telemetry, timings, and any field added later.
+
+    Distinct from ``_sanitize``: this only nulls non-finite floats and never
+    truncates, so it is safe to run over a real response body.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
 def _summarize_array(obj: Any) -> dict:
     """Shape/dtype summary for a numpy-like array, with stats when cheap.
 

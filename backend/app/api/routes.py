@@ -4,6 +4,8 @@ API Routes — POST /api/analyze and GET /api/health.
 Wires together: Validator → Router → Executor → Integrator → TraceBuilder.
 """
 
+import functools
+import re
 import shutil
 import time
 import uuid
@@ -12,21 +14,78 @@ from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, Form, Query, Request, HTTPException
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from typing import Optional
 from loguru import logger
 
+from app.agent.inference_lane import run_in_lane
+from app.agent.preflight import run_preflight
+from app.api.uploads import save_upload_streamed
+from app.output.sanitize import json_safe
 from app.utils.config import settings
 
 router = APIRouter()
+
+# YYYY, YYYY-MM or YYYY-MM-DD. Deliberately not a full date parse — the backend
+# only ever echoes these back in the trace.
+_DATE_RE = re.compile(r"^\d{4}(-\d{2}){0,2}$")
+
+
+def _parse_csv_field(
+    raw: Optional[str],
+    field: str,
+    *,
+    allowed: Optional[frozenset] = None,
+    max_items: int,
+) -> list[str]:
+    """Bounded, optionally allowlisted CSV parse for a form field.
+
+    An empty string yields [] rather than [""] — `"".split(",")` is `[""]`, and
+    that empty string was carried into the execution trace as if it were a real
+    modality. There was also no cap: 20 000 comma-separated entries were
+    accepted and propagated.
+    """
+    if not raw:
+        return []
+
+    items = [p.strip() for p in raw.split(",") if p.strip()]
+    if len(items) > max_items:
+        raise HTTPException(
+            status_code=422,
+            detail={"errors": [
+                f"At most {max_items} {field} values allowed, got {len(items)}."
+            ]},
+        )
+
+    if allowed is not None:
+        bad = sorted({i for i in items if i.lower() not in allowed})
+        if bad:
+            raise HTTPException(
+                status_code=422,
+                detail={"errors": [
+                    f"Unsupported {field}: {', '.join(bad)[:200]}. "
+                    f"Allowed: {', '.join(sorted(allowed))}."
+                ]},
+            )
+        items = [i.lower() for i in items]
+
+    return items
 
 
 @router.post("/analyze")
 async def analyze(
     request: Request,
     images: list[UploadFile] = File(default=[]),
-    query: str = Form(...),
-    modalities: str = Form(default="optical"),
-    dates: Optional[str] = Form(default=None),
+    # max_length here rejects at parse time, before any upload is written to
+    # disk. InputValidator.validate_query still enforces the same 2000-char
+    # limit for callers that reach it another way.
+    query: str = Form(..., max_length=settings.MAX_QUERY_CHARS),
+    modalities: str = Form(
+        default="optical", max_length=settings.MAX_METADATA_FIELD_CHARS
+    ),
+    dates: Optional[str] = Form(
+        default=None, max_length=settings.MAX_METADATA_FIELD_CHARS
+    ),
     debug: Optional[bool] = Query(default=None),
 ):
     """
@@ -84,35 +143,40 @@ async def _run_analysis(
     """Body of POST /api/analyze, split out so the route can guarantee temp
     directory cleanup in a `finally` regardless of how this returns or raises."""
     # ── 1. Save uploaded images to temp directory ──
+    # The image-count check runs BEFORE the write loop. InputValidator enforces
+    # the same limit at step 4, but only after every file has already been
+    # streamed to disk — 20 uploads of 3 MB each cost 60 MB of disk I/O to
+    # produce one 422, and Starlette allows up to 1000 files per request.
+    if len(images) > settings.MAX_IMAGES_PER_REQUEST:
+        raise HTTPException(
+            status_code=422,
+            detail={"errors": [
+                f"Maximum {settings.MAX_IMAGES_PER_REQUEST} images allowed, but "
+                f"{len(images)} were provided. Upload 1 image for VQA/grounding, "
+                "or 2 for change detection/cross-modal."
+            ]},
+        )
+
     # Each image gets its own temp dir, so the original filename is kept
     # (rather than a generic "image_N.ext") — it's echoed back in synthesized
-    # stub answers, and Path(...).name strips any path components for safety.
+    # stub answers. save_upload_streamed sanitizes it; an over-long name used
+    # to raise OSError straight through as a 500.
     upload_start = time.perf_counter()
-    max_upload_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    # Shared byte budget across every file in the request: the per-file cap
+    # alone put no ceiling on the request as a whole.
+    budget = [settings.MAX_REQUEST_SIZE_MB * 1024 * 1024]
     image_paths = []
     for i, img_file in enumerate(images):
-        original_name = Path(img_file.filename or "").name or f"image_{i}.png"
         tmp_dir = Path(tempfile.mkdtemp(prefix="satquery_"))
         tmp_dirs.append(tmp_dir)
-        tmp_path = tmp_dir / original_name
-        # Streamed with a running cap rather than `await img_file.read()`:
-        # that buffered the entire upload in memory and wrote it to disk
-        # before any size check ran, so a multi-GB POST was fully absorbed
-        # before being rejected. MAX_UPLOAD_SIZE_MB was defined but never
-        # enforced anywhere.
-        written = 0
-        with tmp_path.open("wb") as fh:
-            while chunk := await img_file.read(1024 * 1024):
-                written += len(chunk)
-                if written > max_upload_bytes:
-                    raise HTTPException(
-                        status_code=413,
-                        detail={"errors": [
-                            f"Image {i + 1}: exceeds the "
-                            f"{settings.MAX_UPLOAD_SIZE_MB} MB upload limit."
-                        ]},
-                    )
-                fh.write(chunk)
+        tmp_path = await save_upload_streamed(
+            img_file,
+            tmp_dir,
+            i,
+            max_file_bytes=settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+            remaining=budget,
+            limit_label=f"{settings.MAX_UPLOAD_SIZE_MB} MB",
+        )
         image_paths.append(str(tmp_path))
         logger.debug(f"[{request_id}] Saved image {i}: {tmp_path}")
     # Note: this measures the spool→disk copy only. FastAPI has already
@@ -121,10 +185,29 @@ async def _run_analysis(
     upload_ms = (time.perf_counter() - upload_start) * 1000
 
     # ── 2. Parse metadata ──
-    modality_list = [m.strip() for m in modalities.split(",")]
-    date_list = [d.strip() for d in dates.split(",")] if dates else []
+    modality_list = _parse_csv_field(
+        modalities,
+        "modalities",
+        allowed=settings.ALLOWED_MODALITIES,
+        max_items=settings.MAX_MODALITY_ITEMS,
+    ) or ["optical"]
+
+    date_list = _parse_csv_field(dates, "dates", max_items=settings.MAX_DATE_ITEMS)
+    bad_dates = [d for d in date_list if not _DATE_RE.match(d)]
+    if bad_dates:
+        raise HTTPException(
+            status_code=422,
+            detail={"errors": [
+                f"Invalid date format: {', '.join(bad_dates)[:200]}. "
+                "Expected YYYY, YYYY-MM or YYYY-MM-DD."
+            ]},
+        )
+
     metadata = {
-        "modalities": modality_list,
+        # A copy: InputValidator.validate() appends to this list in place to pad
+        # it out to the image count, which would otherwise mutate the very
+        # object the trace reports back as the request's metadata.
+        "modalities": list(modality_list),
         "dates": date_list,
     }
 
@@ -138,7 +221,9 @@ async def _run_analysis(
         raise HTTPException(status_code=422, detail={"errors": [query_error]})
 
     # ── 4. Validate images ──
-    validation = validator.validate(image_paths, metadata)
+    # Off the loop: this decodes every upload with PIL, which for a large raster
+    # is real CPU time that the event loop should not be spending.
+    validation = await run_in_threadpool(validator.validate, image_paths, metadata)
     if not validation.is_valid:
         raise HTTPException(status_code=422, detail={"errors": validation.errors})
     validation_ms = (time.perf_counter() - validation_start) * 1000
@@ -161,8 +246,12 @@ async def _run_analysis(
         try:
             from app.agent.shiven_adapter import ShivenRouterAdapter
 
-            shiven = ShivenRouterAdapter().route(
-                query, input_info, image_paths=image_paths
+            # Off the loop: this makes a BLOCKING urllib call to Ollama.
+            shiven = await run_in_threadpool(
+                ShivenRouterAdapter().route,
+                query,
+                input_info,
+                image_paths=image_paths,
             )
             decision = shiven.decision
             intent_decomposition = shiven.intent_decomposition
@@ -185,12 +274,30 @@ async def _run_analysis(
         )
     routing_ms = (time.perf_counter() - routing_start) * 1000
 
+    # ── 5b. Preflight: reject an impossible plan BEFORE loading any model ──
+    # The router picks a pipeline from query text; the Shiven adapter (the
+    # default) never reads num_images at all. "what changed between the two
+    # images?" with one image attached used to reach ChangeDetectionModel and
+    # die on images[1] — an IndexError the executor swallowed into an HTTP 200
+    # carrying answer "Model not available". Raises PipelineInputError, which
+    # main.py maps to 422/413/503/504 with a machine-readable `code`.
+    preflight_start = time.perf_counter()
+    preflight = await run_in_threadpool(
+        run_preflight, decision.pipeline, image_paths, validation.modalities
+    )
+    validation.warnings.extend(preflight["warnings"])
+    # A zero-image request is downgraded to the conversational plan rather than
+    # rejected, so the trace reports the pipeline that actually ran.
+    decision.pipeline = preflight["pipeline"]
+    preflight_ms = (time.perf_counter() - preflight_start) * 1000
+
     # ── 6. Execute pipeline ──
     registry = request.app.state.model_registry
     execution_start = time.perf_counter()
     if app_settings.SKIP_MODEL_INFERENCE:
         # Honest path when specialist weights are not available: still emit
         # per-step trace rows (model name, query, images) without loading stubs.
+        # Cheap and allocation-free, so it stays on the loop.
         from app.agent.unavailable_executor import UnavailableModelExecutor
 
         step_results = UnavailableModelExecutor().execute(
@@ -204,8 +311,15 @@ async def _run_analysis(
     else:
         from app.agent.executor import PipelineExecutor
 
-        step_results = PipelineExecutor(registry).execute(
-            decision.pipeline, image_paths, query, request_id
+        # The serialized inference lane: one worker, bounded queue. Running
+        # this on the event loop froze the entire server for the duration of
+        # every forward pass, health checks included.
+        step_results = await run_in_lane(
+            PipelineExecutor(registry).execute,
+            decision.pipeline,
+            image_paths,
+            query,
+            request_id,
         )
     execution_ms = (time.perf_counter() - execution_start) * 1000
 
@@ -215,8 +329,12 @@ async def _run_analysis(
     from app.output.integrator import OutputIntegrator
 
     integration_start = time.perf_counter()
-    output = OutputIntegrator().integrate(
-        step_results, decision.task_type, query, request_id
+    output = await run_in_threadpool(
+        OutputIntegrator().integrate,
+        step_results,
+        decision.task_type,
+        query,
+        request_id,
     )
     # When every step was skipped (no weights), surface a clear answer instead
     # of the integrator's "No answer generated."
@@ -228,31 +346,43 @@ async def _run_analysis(
     # ── 8. Build trace ──
     from app.output.trace import TraceBuilder
 
-    trace = TraceBuilder().build(
-        validation,
-        decision,
-        step_results,
-        registry=registry,
-        metadata=metadata,
-        request_id=request_id,
-        stage_ms={
-            "upload_ms": upload_ms,
-            "validation_ms": validation_ms,
-            "routing_ms": routing_ms,
-            "execution_ms": execution_ms,
-            "integration_ms": integration_ms,
-        },
-        request_t0=request_t0,
-        debug=debug,
+    # Off the loop: under ?debug=true, sanitizing per-step payload snapshots is
+    # the most expensive non-inference work in the request.
+    trace = await run_in_threadpool(
+        functools.partial(
+            TraceBuilder().build,
+            validation,
+            decision,
+            step_results,
+            registry=registry,
+            metadata=metadata,
+            request_id=request_id,
+            stage_ms={
+                "upload_ms": upload_ms,
+                "validation_ms": validation_ms,
+                "routing_ms": routing_ms,
+                "preflight_ms": preflight_ms,
+                "execution_ms": execution_ms,
+                "integration_ms": integration_ms,
+            },
+            request_t0=request_t0,
+            debug=debug,
+            spatial=preflight["spatial"],
+        )
     )
 
     # ── 9. Return response ──
-    response = {
+    # json_safe is the last line of defence against the allow_nan=False 500:
+    # Starlette refuses to render a bare NaN/Infinity, so one non-finite float
+    # anywhere in the trace would turn a successful analysis into a 500. The
+    # integrator and the debug sanitizer already guard their own sources; this
+    # covers telemetry, timings, and anything added later.
+    response = json_safe({
         "answer": output["answer"],
         "confidence": output["confidence"],
         "evidence": output["evidence"],
         "execution_trace": trace,
-    }
+    })
 
     logger.info(
         f"[{request_id}] Complete — Task: {decision.task_type.value} | "
@@ -266,7 +396,22 @@ async def _run_analysis(
 @router.get("/health")
 async def health(request: Request):
     """Health check endpoint with GPU and model status."""
-    registry = request.app.state.model_registry
+    # app.state.model_registry only exists once the lifespan has run to
+    # completion. Reading it unguarded raised AttributeError → 500, and an
+    # orchestrator reads a 500 health check as "kill the pod" rather than
+    # "not ready yet" — the same distinction the GPU branch below already makes.
+    registry = getattr(request.app.state, "model_registry", None)
+    if registry is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "starting",
+                "models_loaded": [],
+                "gpu_available": False,
+                "gpu_memory_used": None,
+                "registered_models": None,
+            },
+        )
 
     gpu_available = False
     gpu_mem = None

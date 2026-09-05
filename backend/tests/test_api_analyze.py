@@ -42,7 +42,7 @@ def test_response_is_strictly_valid_json(client, tiny_png):
     json.loads(res.text, parse_constant=_reject_constant)
 
 
-def test_non_finite_values_never_reach_the_client(client, tiny_png, monkeypatch):
+def test_non_finite_values_never_reach_the_client(client, tiny_png, monkeypatch, real_models):
     """The previous version of this guard never set ?debug=true, so every
     payload_snapshot was None and the parse hook had nothing to inspect —
     deleting sanitize.py's NaN handling left it passing. This drives a model
@@ -77,7 +77,7 @@ def test_non_finite_values_never_reach_the_client(client, tiny_png, monkeypatch)
     assert snapshot["ratio"] is None
 
 
-def test_non_dict_model_output_degrades_instead_of_500(client, tiny_png, monkeypatch):
+def test_non_dict_model_output_degrades_instead_of_500(client, tiny_png, monkeypatch, real_models):
     """The integrator runs outside the executor's try/except, so a wrapper
     returning a str used to raise TypeError and 500 the whole request."""
     registry = client.app.state.model_registry
@@ -103,7 +103,7 @@ def _reject_constant(name):
     raise AssertionError(f"non-finite constant {name!r} leaked into the response")
 
 
-def test_trace_carries_real_router_telemetry(client, tiny_png):
+def test_trace_carries_real_router_telemetry(client, tiny_png, rule_router):
     res = _post(client, tiny_png, query="Highlight the water body")
     trace = res.json()["execution_trace"]
     meta = trace["router_metadata"]
@@ -115,7 +115,7 @@ def test_trace_carries_real_router_telemetry(client, tiny_png):
     assert trace["request_id"]
 
 
-def test_llm_planner_fields_are_null_over_the_wire(client, tiny_png):
+def test_llm_planner_fields_are_null_over_the_wire(client, tiny_png, rule_router):
     res = _post(client, tiny_png)
     meta = res.json()["execution_trace"]["router_metadata"]
 
@@ -189,7 +189,7 @@ def test_input_composition_reflects_the_upload(client, tiny_png):
     assert comp["images"][0]["modality"] == "optical"
 
 
-def test_text_only_query_is_accepted(client):
+def test_text_only_query_is_accepted(client, rule_router):
     res = client.post(
         "/api/analyze",
         data={"query": "What can you do?", "modalities": "optical"},

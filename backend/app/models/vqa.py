@@ -10,6 +10,7 @@ Supports actions:
 Falls back to returning 'Model output not available' when Qwen model is not available (no GPU / weights not downloaded).
 """
 
+import math
 import os
 from pathlib import Path
 
@@ -129,7 +130,11 @@ class QwenVLMWrapper(BaseModelWrapper):
 
     def _caption(self, context: dict) -> dict:
         """Generate detailed RS caption."""
-        image_path = context["images"][0]
+        # Was context["images"][0] — IndexError when a caption plan was built
+        # from query text with no image attached.
+        image_path = self.require_images(
+            context, 1, model="rs_vlm", action="generate_caption"
+        )[0]
 
         prompt = (
             "You are a remote sensing expert. Provide a detailed description "
@@ -146,14 +151,24 @@ class QwenVLMWrapper(BaseModelWrapper):
 
     def _describe_changes(self, context: dict) -> dict:
         """Bi-temporal change description using 2 images."""
-        images = context["images"]
+        images = self.require_images(
+            context, 2, model="rs_vlm", action="describe_changes"
+        )
         query = context["query"]
-        change_info = context.get("intermediate", {}).get("step_1", {})
+        # prior_step, not .get("step_1", {}): an upstream wrapper returning a
+        # str made the .get() below raise AttributeError.
+        change_info = self.prior_step(context, 1)
 
-        # Build change context string
+        # Build change context string. `change_ratio` is only interpolated when
+        # it is a real finite number — a None ratio (which a failed or skipped
+        # change-detection step reports) raised TypeError on `ratio * 100`.
         change_context = ""
-        if change_info:
-            ratio = change_info.get("change_ratio", 0)
+        ratio = change_info.get("change_ratio")
+        if (
+            isinstance(ratio, (int, float))
+            and not isinstance(ratio, bool)
+            and math.isfinite(ratio)
+        ):
             change_context = (
                 f"\nA change detection algorithm found that approximately "
                 f"{ratio * 100:.1f}% of the area has changed."
@@ -174,9 +189,11 @@ class QwenVLMWrapper(BaseModelWrapper):
 
     def _analyze_fused(self, context: dict) -> dict:
         """Analyze result after optical-SAR fusion."""
-        images = context["images"]
+        images = self.require_images(
+            context, 2, model="rs_vlm", action="analyze_fused"
+        )
         query = context["query"]
-        fusion_info = context.get("intermediate", {}).get("step_1", {})
+        fusion_info = self.prior_step(context, 1)
 
         # Build fusion context string
         fusion_context = ""

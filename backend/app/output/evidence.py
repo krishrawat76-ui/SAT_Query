@@ -10,15 +10,23 @@ Provides utility functions for generating visual evidence:
   - Legend generation
 """
 
+import math
 import os
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from loguru import logger
 
+from app.utils.config import settings
+from app.utils.raster_io import load_rgb
 
-RESULTS_DIR = Path("results")
+# Was a CWD-relative Path("results"), while main.py mounts the absolute
+# settings.RESULTS_DIR at /results. Launched from the repo root rather than
+# backend/, evidence images were written where nothing serves them — 404 URLs
+# inside an otherwise-successful 200 response.
+RESULTS_DIR = settings.RESULTS_DIR
 
 
 def ensure_results_dir(request_id: str = "") -> Path:
@@ -26,6 +34,56 @@ def ensure_results_dir(request_id: str = "") -> Path:
     out_dir = RESULTS_DIR / request_id if request_id else RESULTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
+
+
+def sanitize_boxes(
+    boxes: list,
+    labels: list,
+    scores: list,
+    width: int,
+    height: int,
+) -> list[tuple[tuple[float, float, float, float], str, float]]:
+    """Drop boxes that cannot be drawn; clamp the rest to the image.
+
+    Detector post-processing produces all of these in practice, and every one
+    was mishandled: out-of-bounds and zero-area boxes rendered as meaningless
+    overlays, while inverted, NaN/inf and wrong-arity boxes raised inside the
+    draw loop and cost the entire overlay — one bad box discarded every good
+    one alongside it.
+    """
+    out = []
+    for box, label, score in zip(boxes, labels, scores):
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            logger.warning(f"Dropping malformed bbox (expected 4 values): {box!r}")
+            continue
+        try:
+            coords = [float(c) for c in box]
+        except (TypeError, ValueError):
+            logger.warning(f"Dropping non-numeric bbox: {box!r}")
+            continue
+        if not all(math.isfinite(c) for c in coords):
+            logger.warning(f"Dropping non-finite bbox: {box!r}")
+            continue
+
+        x1, x2 = sorted((coords[0], coords[2]))
+        y1, y2 = sorted((coords[1], coords[3]))
+        # Clamp into the image before the area test, so a box that is entirely
+        # outside the frame collapses and is dropped rather than drawn at the edge.
+        x1, x2 = max(0.0, min(x1, width)), max(0.0, min(x2, width))
+        y1, y2 = max(0.0, min(y1, height)), max(0.0, min(y2, height))
+        if x2 - x1 < 1 or y2 - y1 < 1:
+            logger.warning(f"Dropping zero-area or off-image bbox: {box!r}")
+            continue
+
+        try:
+            numeric_score = float(score)
+            if not math.isfinite(numeric_score):
+                numeric_score = 0.0
+        except (TypeError, ValueError):
+            numeric_score = 0.0
+
+        out.append(((x1, y1, x2, y2), str(label), numeric_score))
+    return out
 
 
 def overlay_bboxes(
@@ -36,7 +94,7 @@ def overlay_bboxes(
     request_id: str = "demo",
     color: tuple = (0, 120, 255),
     line_width: int = 3,
-) -> str:
+) -> Optional[str]:
     """
     Draw bounding boxes on an image and save as evidence.
 
@@ -50,28 +108,33 @@ def overlay_bboxes(
         line_width: Box border width.
 
     Returns:
-        URL path to the saved evidence image.
+        URL path to the saved evidence image, or None if it could not be
+        generated. `None`, not `""` — an empty string reads as a valid-but-blank
+        URL to a caller, and callers were silently accepting it as evidence.
     """
     try:
-        img = Image.open(image_path).convert("RGB")
+        # load_rgb, not .convert("RGB"): rejects a decompression bomb and
+        # stretches high-bit-depth rasters instead of clipping them to 20
+        # surviving levels.
+        img, _report = load_rgb(image_path, label="Evidence image")
         draw = ImageDraw.Draw(img)
 
-        for box, label, score in zip(boxes, labels, scores):
-            x1, y1, x2, y2 = [int(c) for c in box]
+        drawable = sanitize_boxes(boxes, labels, scores, img.width, img.height)
 
-            # Draw bounding box
+        for (x1, y1, x2, y2), label, score in drawable:
             draw.rectangle([x1, y1, x2, y2], outline=color, width=line_width)
 
-            # Draw label background
             text = f"{label} ({score:.2f})"
             text_bbox = draw.textbbox((x1, y1), text)
             text_h = text_bbox[3] - text_bbox[1]
             text_w = text_bbox[2] - text_bbox[0]
+            # Keep the label inside the frame when the box hugs the top edge.
+            label_y = y1 if y1 - text_h - 6 >= 0 else y2 + text_h + 6
             draw.rectangle(
-                [x1, y1 - text_h - 6, x1 + text_w + 6, y1],
+                [x1, label_y - text_h - 6, x1 + text_w + 6, label_y],
                 fill=color,
             )
-            draw.text((x1 + 3, y1 - text_h - 3), text, fill="white")
+            draw.text((x1 + 3, label_y - text_h - 3), text, fill="white")
 
         out_dir = ensure_results_dir(request_id)
         out_path = out_dir / "grounding_overlay.png"
@@ -79,9 +142,12 @@ def overlay_bboxes(
 
         return f"/results/{request_id}/grounding_overlay.png"
 
-    except Exception as e:
-        logger.error(f"Failed to generate bbox overlay: {e}")
-        return ""
+    except Exception:
+        logger.error(
+            f"Failed to generate bbox overlay for request {request_id}",
+            exc_info=True,
+        )
+        return None
 
 
 def colorize_change_map(
@@ -89,7 +155,7 @@ def colorize_change_map(
     request_id: str = "demo",
     change_color: tuple = (255, 60, 60),
     no_change_color: tuple = (200, 200, 200),
-) -> str:
+) -> Optional[str]:
     """
     Convert a binary change mask to a colored PNG.
 
@@ -114,9 +180,11 @@ def colorize_change_map(
 
         return f"/results/{request_id}/change_map.png"
 
-    except Exception as e:
-        logger.error(f"Failed to generate change map: {e}")
-        return ""
+    except Exception:
+        logger.error(
+            f"Failed to generate change map for request {request_id}", exc_info=True
+        )
+        return None
 
 
 def overlay_segmentation_mask(
@@ -125,7 +193,7 @@ def overlay_segmentation_mask(
     request_id: str = "demo",
     color: tuple = (0, 120, 255),
     alpha: float = 0.4,
-) -> str:
+) -> Optional[str]:
     """
     Overlay a segmentation mask on the original image.
 
@@ -140,7 +208,8 @@ def overlay_segmentation_mask(
         URL path to the saved overlay image.
     """
     try:
-        img = np.array(Image.open(image_path).convert("RGB"))
+        rgb, _report = load_rgb(image_path, label="Segmentation base image")
+        img = np.array(rgb)
 
         overlay = img.copy()
         overlay[mask > 0] = color
@@ -152,9 +221,11 @@ def overlay_segmentation_mask(
 
         return f"/results/{request_id}/segmentation_overlay.png"
 
-    except Exception as e:
-        logger.error(f"Failed to generate segmentation overlay: {e}")
-        return ""
+    except Exception:
+        logger.error(
+            f"Failed to generate segmentation overlay for request {request_id}", exc_info=True
+        )
+        return None
 
 
 def generate_land_cover_map(
@@ -162,7 +233,7 @@ def generate_land_cover_map(
     class_names: list[str],
     class_colors: list[tuple],
     request_id: str = "demo",
-) -> str:
+) -> Optional[str]:
     """
     Convert a class map to a colored land cover visualization.
 
@@ -187,6 +258,8 @@ def generate_land_cover_map(
 
         return f"/results/{request_id}/landcover_map.png"
 
-    except Exception as e:
-        logger.error(f"Failed to generate land cover map: {e}")
-        return ""
+    except Exception:
+        logger.error(
+            f"Failed to generate land cover map for request {request_id}", exc_info=True
+        )
+        return None

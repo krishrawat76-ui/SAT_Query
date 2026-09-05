@@ -34,9 +34,14 @@ class OpticalSARFusionModel(BaseModelWrapper):
     ]
 
     def run(self, action: str, context: dict) -> dict:
-        optical_path = context["images"][0]
-        sar_path = context["images"][1] if len(context["images"]) > 1 else optical_path
-        request_id = context.get("request_id", "demo")
+        # Was context["images"][0] with a silent fall back to reusing the
+        # optical image as the SAR one — fusion of an image with itself,
+        # reported as a real cross-modal result. Preflight rejects a
+        # non-cross-modal pair; this refuses to invent the second input.
+        # Called for the arity check, not the paths: this stub returns empty
+        # literals, and a real fusion network would read images[0] (optical)
+        # and images[1] (SAR).
+        self.require_images(context, 2, model="optical_sar_fusion", action=action)
 
         logger.info("[STUB] Optical-SAR fusion running")
 

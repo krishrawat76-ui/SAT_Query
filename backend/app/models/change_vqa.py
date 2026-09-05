@@ -25,7 +25,12 @@ class ChangeVQAModel(BaseModelWrapper):
 
     def run(self, action: str, context: dict) -> dict:
         query = context["query"]
-        images = context["images"]
+        # Bi-temporal by definition. This stub never indexes the list, but the
+        # declared arity is enforced here too so a real implementation cannot
+        # inherit a one-image context from a text-only routing decision.
+        images = self.require_images(
+            context, 2, model="change_vqa", action=action
+        )
 
         logger.info(f"[STUB] Change VQA answering: '{query[:50]}...'")
 

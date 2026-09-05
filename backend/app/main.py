@@ -7,11 +7,17 @@ and serves the analysis API.
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException
 
+from app.agent.exceptions import PipelineInputError
+from app.agent.inference_lane import shutdown_lane
 from app.api.routes import router
 from app.api.raster import router as raster_router
 from app.utils.config import settings
@@ -59,7 +65,11 @@ async def lifespan(app: FastAPI):
     yield  # App runs
 
     # ── Shutdown ──
-    logger.info("Shutting down — unloading all models...")
+    # Lane first: unloading weights out from under a running inference would
+    # leave the worker thread holding a half-freed model.
+    logger.info("Shutting down — draining the inference lane...")
+    shutdown_lane()
+    logger.info("Unloading all models...")
     registry.unload_all()
     logger.info("👋 SatQuery AI backend stopped")
 
@@ -71,13 +81,129 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+MAX_BODY_BYTES = settings.MAX_REQUEST_SIZE_MB * 1024 * 1024
+
+
+def _envelope(errors: list[str], **extra) -> dict:
+    """One error shape for the whole API: {"detail": {"errors": [...]}}.
+
+    The API previously spoke two dialects — FastAPI's own
+    {"detail": [{loc, msg, type}]} for framework validation, and
+    {"detail": {"errors": [...]}} for hand-raised HTTPExceptions — forcing
+    every client to branch on the shape of a failure.
+    """
+    return {"detail": {"errors": errors, **extra}}
+
+
+# ── Request body size gate ──
+@app.middleware("http")
+async def limit_request_body(request: Request, call_next):
+    """Reject oversized bodies before the multipart parser touches them.
+
+    Content-Length only. A chunked request carries none, which is exactly why
+    the streaming budget in app/api/uploads.py is the real backstop and this
+    middleware is only the cheap first pass.
+    """
+    raw = request.headers.get("content-length")
+    if raw is not None:
+        try:
+            declared = int(raw)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content=_envelope(["Malformed Content-Length header."]),
+            )
+        if declared > MAX_BODY_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content=_envelope([
+                    f"Request body exceeds the {settings.MAX_REQUEST_SIZE_MB} MB limit."
+                ]),
+            )
+    return await call_next(request)
+
+
+# ── Exception handlers ──
+@app.exception_handler(PipelineInputError)
+async def _pipeline_input_error(request: Request, exc: PipelineInputError):
+    """Domain rejections: the request cannot drive the pipeline it was routed to.
+
+    These previously surfaced as IndexError/KeyError inside a model wrapper,
+    were swallowed by PipelineExecutor's broad except, and returned HTTP 200
+    with answer "Model not available". They carry a machine-readable `code`
+    (arity_mismatch, modality_mismatch, spatial_mismatch, ...) so the client can
+    branch without parsing prose.
+    """
+    logger.info(f"Pipeline input rejected [{exc.code}]: {exc.message}")
+    extra = {"context": exc.details} if exc.details else {}
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_envelope([exc.message], code=exc.code, **extra),
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_error(request: Request, exc: StarletteHTTPException):
+    detail = exc.detail
+    if isinstance(detail, dict) and "errors" in detail:
+        errors = [str(e) for e in detail["errors"]]
+    else:
+        errors = [str(detail)]
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_envelope(errors),
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError):
+    """Flatten FastAPI's validation errors into the shared envelope.
+
+    Only `loc` and `msg` are forwarded. Each entry also carries an `input` that
+    echoes the client's own value back — reflecting a hostile or multi-megabyte
+    field into the response body is not something an error path should do.
+    """
+    errors = [
+        f"{'.'.join(str(p) for p in e.get('loc', [])[1:]) or 'body'}: "
+        f"{e.get('msg', 'invalid value')}"
+        for e in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content=_envelope(errors))
+
+
+@app.exception_handler(MultiPartException)
+async def _multipart_error(request: Request, exc: MultiPartException):
+    """A malformed or over-sized multipart body is the client's error, not a 500."""
+    return JSONResponse(
+        status_code=400,
+        content=_envelope([f"Malformed multipart body: {exc.message}"]),
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    """Never let an unexpected exception reach the client as a non-JSON 500.
+
+    Starlette's default returns the plain-text string "Internal Server Error",
+    which breaks the frontend's res.json(). The traceback stays server-side.
+    """
+    logger.opt(exception=exc).error(
+        f"Unhandled {type(exc).__name__} on {request.method} {request.url.path}"
+    )
+    return JSONResponse(status_code=500, content=_envelope(["Internal server error."]))
+
+
 # ── CORS ──
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.CORS_ORIGINS,   # "null" stays, for file:// demos
+    # Was True. Paired with the "null" origin it let any sandboxed iframe or
+    # file:// page issue credentialed cross-origin requests. This API uses no
+    # cookies or auth headers, so credentials buy nothing.
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 # ── Static files (evidence images) ──

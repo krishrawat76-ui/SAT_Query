@@ -1,7 +1,10 @@
 # SatQuery AI — Backend Dependencies
 # ====================================
 # Core
-fastapi==0.115.0
+# fastapi 0.115.3+ pulls starlette>=0.40.0, which caps the size of a single
+# multipart part (CVE-2024-47874). Below that, a form field like `query` is
+# buffered in memory with no limit at all before any handler code runs.
+fastapi>=0.115.3,<0.116
 uvicorn[standard]==0.30.0
 python-multipart==0.0.12
 pydantic==2.9.0

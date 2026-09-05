@@ -104,8 +104,13 @@ class InputValidator:
                         f"Maximum: {self.MAX_IMAGE_SIZE_MB} MB."
                     )
                     continue
-            except OSError as e:
-                errors.append(f"{img_label}: Cannot access file — {e}")
+            except OSError:
+                # The raw OSError text embeds the absolute temp path. It went
+                # straight into the 422 body and disclosed the temp-dir scheme,
+                # the OS, and the account the server runs as. Log it, don't
+                # echo it.
+                logger.warning(f"{img_label}: stat() failed for {p}", exc_info=True)
+                errors.append(f"{img_label}: Upload could not be read from storage.")
                 continue
 
             # Readability check
@@ -135,8 +140,14 @@ class InputValidator:
                     "file_size_mb": round(size_mb, 2),
                 })
 
-            except Exception as e:
-                errors.append(f"{img_label}: Cannot read image — {e}")
+            except Exception:
+                # Same disclosure as the OSError branch above: PIL's message is
+                # "cannot identify image file '/var/folders/.../satquery_xxx/f.png'".
+                logger.warning(f"{img_label}: PIL could not open {path}", exc_info=True)
+                errors.append(
+                    f"{img_label}: Not a readable image. "
+                    f"Accepted formats: {', '.join(sorted(self.VALID_EXTENSIONS))}."
+                )
 
         # ── Extend modalities to match image count ──
         while len(modalities) < len(image_paths):
