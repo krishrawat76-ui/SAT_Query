@@ -112,6 +112,9 @@ class TraceBuilder:
         request_t0: Optional[float] = None,
         debug: bool = False,
         spatial: Optional[dict] = None,
+        land_cover_check: Optional[dict] = None,
+        remote_dispatch: Optional[dict] = None,
+        fallback_strategy: Optional[dict] = None,
     ) -> dict:
         """
         Build the complete execution trace.
@@ -131,6 +134,15 @@ class TraceBuilder:
             spatial: Ground-overlap facts from preflight (bbox IoU, whether the
                 check was enforced, per-image bbox source). Empty for a
                 single-image request, which has nothing to overlap.
+            land_cover_check: Fast land-cover pre-check outcome (threshold,
+                breakdown, land_pct, whether it passed) — None when no
+                optical image was present to check. See
+                app/agent/land_cover_check.py.
+            remote_dispatch: Whether the remote VLM was actually dispatched,
+                and to which paired node — None only when the caller has
+                nothing to report (mirrors spatial/land_cover_check).
+            fallback_strategy: Whether a fallback response was used instead
+                of the model path, and why.
 
         Returns:
             Dict matching the ExecutionTrace API schema.
@@ -239,8 +251,15 @@ class TraceBuilder:
                 # legitimately exceed the total, but float noise shouldn't
                 # surface as -0.0001.
                 "other_ms": round(max(0.0, total_time_ms - measured), 3),
+                "land_cover_ms": round(stage_ms.get("land_cover_ms", 0.0), 3),
             },
             "total_time_ms": total_time_ms,
+            # None on every request with no optical image to check (nothing
+            # for this endpoint to report) — never a fabricated all-zero
+            # breakdown or a pass/fail guess.
+            "land_cover_check": land_cover_check,
+            "remote_dispatch": remote_dispatch,
+            "fallback_strategy": fallback_strategy,
         }
 
     def _selected_models(self, decision: RoutingDecision, registry) -> list[dict]:

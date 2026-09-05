@@ -49,8 +49,14 @@ async def lifespan(app: FastAPI):
     from app.models.change_detection import ChangeDetectionModel
     from app.models.change_vqa import ChangeVQAModel
     from app.models.optical_sar import OpticalSARFusionModel
+    from app.models.land_cover import LandCoverModel
 
     registry = ModelRegistry()
+
+    # Fast land-cover pre-check (MobileNetV4 UNet in the real deployment) —
+    # lightweight by design, registered first and never competes meaningfully
+    # with rs_vlm's VRAM budget.
+    registry.register("land_cover", lambda: LandCoverModel(), vram_gb=0.1)
 
     # VQA + Caption + Change Description (Qwen2.5-VL-7B)
     registry.register("rs_vlm", lambda: QwenVLMWrapper(), vram_gb=5.5)

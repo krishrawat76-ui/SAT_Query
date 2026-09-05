@@ -103,6 +103,15 @@ class Settings:
     MAX_QUERY_CHARS: int = 2000
     MAX_METADATA_FIELD_CHARS: int = 512
 
+    # ── Land cover pre-check ──
+    # A lightweight local segmentation pass, run concurrently with query
+    # routing, that can answer a request (or skip the slow remote VLM round
+    # trip) from a land-cover breakdown alone when the scene lacks
+    # high-level feature signal. See app/agent/land_cover_check.py.
+    LAND_COVER_THRESHOLD_PCT: float = float(
+        os.environ.get("LAND_COVER_THRESHOLD_PCT", "70.0")
+    )
+
     # ── Debug ──
     # Default for the execution trace's per-step payload snapshots when a
     # request doesn't pass ?debug explicitly. Snapshotting costs real CPU on

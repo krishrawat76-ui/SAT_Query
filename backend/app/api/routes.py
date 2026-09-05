@@ -4,6 +4,7 @@ API Routes — POST /api/analyze and GET /api/health.
 Wires together: Validator → Router → Executor → Integrator → TraceBuilder.
 """
 
+import asyncio
 import functools
 import re
 import shutil
@@ -19,6 +20,11 @@ from typing import Optional
 from loguru import logger
 
 from app.agent.inference_lane import run_in_lane
+from app.agent.land_cover_check import (
+    evaluate_threshold,
+    fallback_answer as land_cover_fallback_answer,
+    land_cover_result_from_raw,
+)
 from app.agent.preflight import run_preflight
 from app.api.uploads import save_upload_streamed
 from app.output.sanitize import json_safe
@@ -248,11 +254,15 @@ async def _run_analysis(
         )
     validation_ms = (time.perf_counter() - validation_start) * 1000
 
-    # ── 5. Route ──
+    # ── 5. Route, concurrently with the fast land-cover pre-check ──
     # Prefer Shiven QueryPlanner (Ollama Qwen3) via a thin adapter; fall back
     # to the in-repo RuleBasedRouter only if disabled or import/path fails.
     from app.agent.router import RuleBasedRouter
     from app.utils.config import settings as app_settings
+
+    # Read once, up front: both the concurrent land-cover check below and
+    # the execution step further down need it.
+    registry = request.app.state.model_registry
 
     input_info = {
         "num_images": validation.num_images,
@@ -260,54 +270,172 @@ async def _run_analysis(
         "is_temporal": validation.is_temporal,
         "is_cross_modal": validation.is_cross_modal,
     }
-    routing_start = time.perf_counter()
-    intent_decomposition = None
-    if app_settings.USE_SHIVEN_ROUTER:
-        try:
-            from app.agent.shiven_adapter import ShivenRouterAdapter
 
-            # Off the loop: this makes a BLOCKING urllib call to Ollama.
-            shiven = await run_in_threadpool(
-                ShivenRouterAdapter().route,
-                query,
-                input_info,
-                image_paths=image_paths,
-            )
-            decision = shiven.decision
-            intent_decomposition = shiven.intent_decomposition
-            # Preserve spatial / sufficiency facts from validation on the plan
-            # without altering router core logic.
-            if intent_decomposition and validation.requirements:
-                for item in intent_decomposition:
-                    if isinstance(item, dict):
-                        item.setdefault(
-                            "spatial_constraint",
-                            validation.requirements.get("spatial_constraint"),
-                        )
-                        item.setdefault(
-                            "required_inputs",
-                            validation.requirements,
-                        )
-            if validation.requirements and decision.intent_decomposition is None:
-                decision.intent_decomposition = intent_decomposition
+    async def _route() -> tuple:
+        intent_decomposition = None
+        if app_settings.USE_SHIVEN_ROUTER:
+            try:
+                from app.agent.shiven_adapter import ShivenRouterAdapter
+
+                # Off the loop: this makes a BLOCKING urllib call to Ollama.
+                shiven = await run_in_threadpool(
+                    ShivenRouterAdapter().route,
+                    query,
+                    input_info,
+                    image_paths=image_paths,
+                )
+                decision = shiven.decision
+                intent_decomposition = shiven.intent_decomposition
+                # Preserve spatial / sufficiency facts from validation on the
+                # plan without altering router core logic.
+                if intent_decomposition and validation.requirements:
+                    for item in intent_decomposition:
+                        if isinstance(item, dict):
+                            item.setdefault(
+                                "spatial_constraint",
+                                validation.requirements.get("spatial_constraint"),
+                            )
+                            item.setdefault(
+                                "required_inputs",
+                                validation.requirements,
+                            )
+                if validation.requirements and decision.intent_decomposition is None:
+                    decision.intent_decomposition = intent_decomposition
+                logger.info(
+                    f"[{request_id}] Shiven routed → {decision.task_type.value} "
+                    f"[{decision.rule_id}] fallback={shiven.fallback_used} — "
+                    f"{decision.reasoning}"
+                )
+            except Exception as exc:
+                logger.error(
+                    f"[{request_id}] Shiven adapter failed ({exc}); "
+                    "using RuleBasedRouter"
+                )
+                decision = RuleBasedRouter().route(query, input_info)
+        else:
+            # Off the loop even though RuleBasedRouter is normally
+            # microseconds of pure keyword matching: with no await point at
+            # all, a synchronous call here would run to completion before
+            # ever yielding control, which would serialize this branch
+            # against _check_land_cover() below instead of truly overlapping
+            # it — the whole point of gathering the two.
+            decision = await run_in_threadpool(RuleBasedRouter().route, query, input_info)
             logger.info(
-                f"[{request_id}] Shiven routed → {decision.task_type.value} "
-                f"[{decision.rule_id}] fallback={shiven.fallback_used} — "
-                f"{decision.reasoning}"
+                f"[{request_id}] Routed → {decision.task_type.value} "
+                f"[{decision.rule_id}] — {decision.reasoning}"
             )
-        except Exception as exc:
-            logger.error(
-                f"[{request_id}] Shiven adapter failed ({exc}); "
-                "using RuleBasedRouter"
-            )
-            decision = RuleBasedRouter().route(query, input_info)
-    else:
-        decision = RuleBasedRouter().route(query, input_info)
-        logger.info(
-            f"[{request_id}] Routed → {decision.task_type.value} "
-            f"[{decision.rule_id}] — {decision.reasoning}"
+        return decision, intent_decomposition
+
+    # Only meaningful for an optical image. Genuinely concurrent with
+    # routing via asyncio.gather below, not sequential before or after it —
+    # a slow NLP planning call (Ollama can take a second or more) must not
+    # sit in front of an answer this cheap check could already provide.
+    has_optical_image = bool(image_paths) and any(
+        m == "optical" for m in validation.modalities[: len(image_paths)]
+    )
+
+    async def _check_land_cover():
+        if not has_optical_image:
+            return None
+        try:
+            land_cover_model = registry.get("land_cover")
+        except (KeyError, ValueError) as exc:
+            logger.debug(f"[{request_id}] land_cover model unavailable: {exc}")
+            return None
+        lc_context = {"images": image_paths, "query": query, "request_id": request_id}
+        raw = await run_in_threadpool(
+            land_cover_model.run, "segment_land_cover", lc_context
         )
+        return land_cover_result_from_raw(raw)
+
+    routing_start = time.perf_counter()
+    land_cover_start = time.perf_counter()
+    (decision, intent_decomposition), land_cover_result = await asyncio.gather(
+        _route(), _check_land_cover()
+    )
     routing_ms = (time.perf_counter() - routing_start) * 1000
+    land_cover_ms = (
+        (time.perf_counter() - land_cover_start) * 1000 if has_optical_image else 0.0
+    )
+
+    # ── 5a. Land-cover threshold gate ──
+    # True: proceed to the VLM as normal. False: the scene already has a
+    # confident land-cover answer — skip dispatch entirely rather than pay
+    # for a remote round trip nothing downstream needed ("cancelling" the
+    # remote request, in practice — see land_cover_check.py's docstring for
+    # why that means "never start it" rather than interrupting one already
+    # in flight). None: no real model loaded (the stub today, always), so
+    # this never blocks a real request — proceeds exactly as if the check
+    # had not run at all.
+    land_cover_decision = (
+        evaluate_threshold(land_cover_result, app_settings.LAND_COVER_THRESHOLD_PCT)
+        if land_cover_result is not None
+        else None
+    )
+
+    def _land_cover_trace_block() -> Optional[dict]:
+        if land_cover_result is None:
+            return None
+        return {
+            "threshold": app_settings.LAND_COVER_THRESHOLD_PCT,
+            "breakdown": land_cover_result.breakdown,
+            "land_pct": land_cover_result.land_pct,
+            "available": land_cover_result.available,
+            "passed": land_cover_decision,
+        }
+
+    if land_cover_decision is False:
+        logger.info(
+            f"[{request_id}] Land-cover check below threshold "
+            f"({land_cover_result.land_pct:.1f}% < "
+            f"{app_settings.LAND_COVER_THRESHOLD_PCT:.0f}%) — "
+            "skipping remote VLM dispatch."
+        )
+        from app.output.trace import TraceBuilder
+
+        trace = await run_in_threadpool(
+            functools.partial(
+                TraceBuilder().build,
+                validation,
+                decision,
+                [],
+                registry=registry,
+                metadata=metadata,
+                request_id=request_id,
+                stage_ms={
+                    "upload_ms": upload_ms,
+                    "validation_ms": validation_ms,
+                    "routing_ms": routing_ms,
+                    "land_cover_ms": land_cover_ms,
+                    "preflight_ms": 0.0,
+                    "execution_ms": 0.0,
+                    "integration_ms": 0.0,
+                },
+                request_t0=request_t0,
+                debug=debug,
+                spatial=None,
+                land_cover_check=_land_cover_trace_block(),
+                remote_dispatch={"dispatched": False, "node_id": None, "task": None},
+                fallback_strategy={
+                    "triggered": True,
+                    "reason": "land_cover_below_threshold",
+                    "action": (
+                        "Displayed the fast land-cover breakdown instead of "
+                        "dispatching to the remote VLM."
+                    ),
+                },
+            )
+        )
+        response = json_safe({
+            "answer": land_cover_fallback_answer(
+                land_cover_result, app_settings.LAND_COVER_THRESHOLD_PCT
+            ),
+            "confidence": None,
+            "evidence": {"images": [], "regions": []},
+            "execution_trace": trace,
+        })
+        logger.info(f"[{request_id}] Complete — land-cover fallback, no dispatch")
+        return response
 
     # ── 5b. Preflight: reject an impossible plan BEFORE loading any model ──
     # The router picks a pipeline from query text; the Shiven adapter (the
@@ -334,7 +462,7 @@ async def _run_analysis(
     # ── 6. Execute pipeline ──
     # Hybrid executor: paired Model Hosts handle rs_vlm remotely; otherwise
     # preserve SKIP_MODEL_INFERENCE / local PipelineExecutor behavior.
-    registry = request.app.state.model_registry
+    # (registry was already read in step 5, for the land-cover check.)
     execution_start = time.perf_counter()
     from app.agent.hybrid_executor import HybridPipelineExecutor
 
@@ -373,6 +501,7 @@ async def _run_analysis(
     )
     # When every step was skipped (no weights), surface a clear answer instead
     # of the integrator's "No answer generated."
+    post_exec_fallback = False
     if not any(r.success for r in step_results):
         # Prefer a concrete remote/local error over a generic placeholder
         remote_err = next(
@@ -385,12 +514,49 @@ async def _run_analysis(
             ),
             None,
         )
-        output["answer"] = remote_err or "Model not available"
+        # Covers the spec's "OR if the remote VLM service times out/fails"
+        # trigger specifically — distinct from "no weights loaded locally
+        # and no Model Host paired," which is this app's normal honest-stub
+        # state (see UnavailableModelExecutor) and not a failure to fall
+        # back from. Only a genuine remote_error, with real land-cover data
+        # to fall back to, upgrades the answer here.
+        post_exec_fallback = (
+            remote_err is not None
+            and land_cover_result is not None
+            and land_cover_result.available
+        )
+        if post_exec_fallback:
+            output["answer"] = land_cover_fallback_answer(
+                land_cover_result, app_settings.LAND_COVER_THRESHOLD_PCT
+            )
+        else:
+            output["answer"] = remote_err or "Model not available"
         output["confidence"] = None
     integration_ms = (time.perf_counter() - integration_start) * 1000
 
     # ── 8. Build trace ──
     from app.output.trace import TraceBuilder
+
+    remote_step = next(
+        (
+            r for r in step_results
+            if isinstance(r.output, dict) and r.output.get("execution") == "REMOTE"
+        ),
+        None,
+    )
+    remote_dispatch_info = {
+        "dispatched": remote_step is not None,
+        "node_id": remote_step.output.get("node_id") if remote_step else None,
+        "task": remote_step.action if remote_step else None,
+    }
+    fallback_strategy_info = {
+        "triggered": post_exec_fallback,
+        "reason": "remote_vlm_failed" if post_exec_fallback else None,
+        "action": (
+            "Displayed the fast land-cover breakdown after the model path failed."
+            if post_exec_fallback else None
+        ),
+    }
 
     # Off the loop: under ?debug=true, sanitizing per-step payload snapshots is
     # the most expensive non-inference work in the request.
@@ -407,6 +573,7 @@ async def _run_analysis(
                 "upload_ms": upload_ms,
                 "validation_ms": validation_ms,
                 "routing_ms": routing_ms,
+                "land_cover_ms": land_cover_ms,
                 "preflight_ms": preflight_ms,
                 "execution_ms": execution_ms,
                 "integration_ms": integration_ms,
@@ -414,6 +581,9 @@ async def _run_analysis(
             request_t0=request_t0,
             debug=debug,
             spatial=preflight["spatial"],
+            land_cover_check=_land_cover_trace_block(),
+            remote_dispatch=remote_dispatch_info,
+            fallback_strategy=fallback_strategy_info,
         )
     )
 
