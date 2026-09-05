@@ -4,7 +4,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import QueryInput from "@/components/QueryInput";
-import ResultInspectorPanel, { PANEL_SIDE_MARGIN, PANEL_WIDTH } from "@/components/ResultInspectorPanel";
+import ResultInspectorPanel from "@/components/ResultInspectorPanel";
 import LibraryDrawer from "@/components/LibraryDrawer";
 import SatelliteMap from "@/components/SatelliteMap";
 import CloudTransition, { type CloudPhase } from "@/components/CloudTransition";
@@ -837,12 +837,16 @@ export default function Home() {
         // of those per-frame updates kick off its own brief animation,
         // which queues up faster than they can finish and reads as a
         // laggy, rubber-banding chase instead of the map's own smooth
-        // motion. Falls back to a fixed position near the panel when
-        // there's no map at all (e.g. a text-only turn).
+        // motion. Falls back to a fixed offset from the sidebar's own edge
+        // when there's no mask at all (e.g. a text-only turn) — anchored on
+        // the SAME left side as the focusRect position above, not the right
+        // (previously it jumped all the way over to hug the ResultInspectorPanel,
+        // reading as an arbitrary shift to the opposite side of the screen
+        // the instant a turn had no imagery).
         const GAP = 8;
         const style: React.CSSProperties = focusRect
           ? { left: focusRect.left - GAP, top: (focusRect.top + focusRect.bottom) / 2, transform: "translate(-100%, -50%)" }
-          : { right: PANEL_SIDE_MARGIN + PANEL_WIDTH + 16, top: "50%", transform: "translateY(-50%)" };
+          : { left: sidebarWidthPx + 24, top: "50%", transform: "translateY(-50%)" };
         return (
         <div
           className="fixed z-30 flex flex-col gap-2"

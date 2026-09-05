@@ -149,7 +149,12 @@ export function useMapCamera() {
         // Phase 5 finishes the rest with a precision snap.
         const approachZoom = macroZoom + (targetZoom - macroZoom) * 0.5;
 
-        updateMarker(targetCoords);
+        // Marker is deliberately NOT dropped here. It used to appear the
+        // instant a flight was scheduled — while the camera was still
+        // zoomed out over open ocean, phases away from the destination —
+        // reading as a pin floating over the wrong place on the globe. It's
+        // added instead in the phase-5 completion callback below, once the
+        // camera has actually arrived at targetCoords.
 
         // Phase 1 — source breakout: smooth acceleration zoom-out.
         map.easeTo({
@@ -217,7 +222,12 @@ export function useMapCamera() {
                         }
 
                         const t5 = window.setTimeout(() => {
-                            if (isCurrent()) onComplete?.();
+                            if (isCurrent()) {
+                                // The camera has actually landed on
+                                // targetCoords now — safe to drop the pin.
+                                updateMarker(targetCoords);
+                                onComplete?.();
+                            }
                         }, phaseMs);
                         timeoutsRef.current.push(t5);
                     }, phaseMs);

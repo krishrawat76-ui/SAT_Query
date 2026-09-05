@@ -100,7 +100,7 @@ export default function DebugPanel({
     const snapshotSteps = trace?.pipeline_steps.filter((s) => s.payload_snapshot != null) ?? [];
 
     return (
-        <div className="rounded-2xl border border-amber-500/20 bg-slate-900/70 shadow-2xl backdrop-blur-xl">
+        <div className="overflow-hidden rounded-[28px] border border-amber-500/20 bg-slate-900/70 shadow-2xl backdrop-blur-xl">
             <button
                 type="button"
                 onClick={() => setOpen((v) => !v)}

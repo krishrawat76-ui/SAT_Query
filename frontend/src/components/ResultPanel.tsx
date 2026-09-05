@@ -48,7 +48,7 @@ export default function ResultPanel({ result, loading, error }: ResultPanelProps
     const typedAnswer = useTypewriter(result?.answer);
 
     return (
-        <div className="rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-2xl backdrop-blur-xl">
+        <div className="overflow-hidden rounded-[28px] border border-white/10 bg-slate-900/70 p-5 shadow-2xl backdrop-blur-xl">
             <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-medium text-slate-100">Result</h2>
                 {result && (

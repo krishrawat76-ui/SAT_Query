@@ -234,7 +234,15 @@ export default function QueryInput({
                         the chat bar itself. */}
                     <RadiantCard className="z-30" haloInset={24} hideHalo={attachOpen || suggestOpen}>
                     <div
-                        className={`flex items-end gap-2 rounded-full border bg-slate-900/60 p-2.5 shadow-2xl backdrop-blur-xl transition-colors ${focused ? "border-white/25" : "border-white/15"
+                        // A fixed radius rather than rounded-full: at one line
+                        // (~56px tall) that still reads as a fully-rounded
+                        // pill, but growing to 2-3 lines with rounded-full
+                        // scaled the corner radius up with the box height,
+                        // ballooning into an elongated stadium shape with
+                        // large empty rounded caps above the (fixed-size)
+                        // +/send buttons — reading as misaligned even though
+                        // both buttons stay bottom-anchored together.
+                        className={`flex items-end gap-2 rounded-[28px] border bg-slate-900/60 p-2.5 shadow-2xl backdrop-blur-xl transition-colors ${focused ? "border-white/25" : "border-white/15"
                             }`}
                     >
                     <button

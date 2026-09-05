@@ -14,7 +14,7 @@ export default function ExecutionTrace({ trace }: ExecutionTraceProps) {
     if (!trace) return null;
 
     return (
-        <div className="rounded-2xl border border-white/10 bg-slate-900/70 shadow-2xl backdrop-blur-xl">
+        <div className="overflow-hidden rounded-[28px] border border-white/10 bg-slate-900/70 shadow-2xl backdrop-blur-xl">
             <button
                 type="button"
                 onClick={() => setOpen((v) => !v)}

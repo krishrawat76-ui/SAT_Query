@@ -121,10 +121,10 @@ export default function ResultInspectorPanel({ turn, retryDisabled, onRetry, deb
                             row's bottom edge even when the whole stack fits
                             with nothing behind either edge to hide. */}
                         {canScrollUp && (
-                            <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-10 rounded-t-2xl backdrop-blur-md [mask-image:linear-gradient(to_bottom,black,transparent)]" />
+                            <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-10 rounded-t-[28px] backdrop-blur-md [mask-image:linear-gradient(to_bottom,black,transparent)]" />
                         )}
                         {canScrollDown && (
-                            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-10 rounded-b-2xl backdrop-blur-md [mask-image:linear-gradient(to_top,black,transparent)]" />
+                            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-10 rounded-b-[28px] backdrop-blur-md [mask-image:linear-gradient(to_top,black,transparent)]" />
                         )}
                         <div
                             ref={scrollRef}

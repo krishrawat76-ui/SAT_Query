@@ -24,7 +24,13 @@ export default function MessageActions({ text, onRetry, retryDisabled }: Message
     };
 
     return (
-        <div className="flex items-center gap-1 px-1">
+        // Previously bare — icons floating with no surface of their own,
+        // legible only against a dark enough patch of whatever satellite
+        // imagery happened to be behind them. Same glass-card language as
+        // the other panels above it (rounded-[28px], slate-900/70 +
+        // backdrop-blur) so it reads as part of the same stack rather than
+        // loose controls sitting directly on the map.
+        <div className="flex w-fit items-center gap-1 rounded-[28px] border border-white/10 bg-slate-900/70 p-1 shadow-2xl backdrop-blur-xl">
             {text && (
                 <button
                     type="button"
